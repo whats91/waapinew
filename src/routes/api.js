@@ -849,4 +849,84 @@ router.post('/validateNumber', validateAuthToken, validateSenderId, checkSession
     }
 });
 
+// Logout session endpoint
+router.post('/logoutSession', validateAuthToken, validateSenderId, checkSessionExists, async (req, res) => {
+    try {
+        const { senderId, sessionId } = req.body;
+        
+        // Use alias if main parameter is not provided
+        const finalSenderId = senderId || sessionId;
+        
+        logger.api('/logoutSession', 'Session logout requested', { senderId: finalSenderId });
+        
+        await sessionManager.logoutSession(finalSenderId);
+        
+        res.json({
+            success: true,
+            message: 'Session logged out successfully',
+            data: {
+                senderId: finalSenderId,
+                status: 'logged_out',
+                timestamp: new Date().toISOString()
+            }
+        });
+        
+    } catch (error) {
+        logger.error('Error in /logoutSession', { error: error.message, senderId: req.body?.senderId || req.body?.sessionId });
+        res.status(500).json({
+            success: false,
+            message: 'Failed to logout session',
+            error: error.message,
+            senderId: req.body?.senderId || req.body?.sessionId
+        });
+    }
+});
+
+// Delete session endpoint (removes from database and deletes session folder)
+router.post('/deleteSession', validateAuthToken, validateSenderId, async (req, res) => {
+    try {
+        const { senderId, sessionId } = req.body;
+        
+        // Use alias if main parameter is not provided
+        const finalSenderId = senderId || sessionId;
+        
+        // Check if session exists in database (don't require active session)
+        const sessionData = await sessionManager.database.getSession(finalSenderId);
+        if (!sessionData) {
+            return res.status(404).json({
+                success: false,
+                message: 'Session not found',
+                error: `Session not found for senderId: ${finalSenderId}`,
+                data: {
+                    senderId: finalSenderId
+                }
+            });
+        }
+        
+        logger.api('/deleteSession', 'Session deletion requested', { senderId: finalSenderId });
+        
+        await sessionManager.deleteSession(finalSenderId);
+        
+        res.json({
+            success: true,
+            message: 'Session deleted successfully',
+            data: {
+                senderId: finalSenderId,
+                status: 'deleted',
+                timestamp: new Date().toISOString(),
+                note: 'Session removed from database and session folder deleted'
+            }
+        });
+        
+    } catch (error) {
+        logger.error('Error in /deleteSession', { error: error.message, senderId: req.body?.senderId || req.body?.sessionId });
+        res.status(500).json({
+            success: false,
+            message: 'Failed to delete session',
+            error: error.message,
+            senderId: req.body?.senderId || req.body?.sessionId
+        });
+    }
+});
+
 module.exports = { router, setSessionManager }; 

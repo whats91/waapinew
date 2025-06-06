@@ -163,6 +163,28 @@ class SessionManager {
         }
     }
 
+    async logoutSession(sessionId) {
+        const session = this.sessions.get(sessionId);
+        if (!session) {
+            throw new Error(`Session ${sessionId} not found`);
+        }
+
+        try {
+            // Logout the session (this will trigger logged out status)
+            await session.logout();
+            this.sessions.delete(sessionId);
+            
+            // Update database status
+            await this.database.updateSessionStatus(sessionId, 'logged_out');
+            
+            logger.info('Session logged out', { sessionId });
+            return true;
+        } catch (error) {
+            logger.error('Failed to logout session', { sessionId, error: error.message });
+            throw error;
+        }
+    }
+
     async deleteSession(sessionId) {
         // First destroy the active session
         if (this.sessions.has(sessionId)) {
@@ -170,6 +192,17 @@ class SessionManager {
         }
 
         try {
+            // Delete session folder from filesystem
+            const fs = require('fs');
+            const path = require('path');
+            const sessionPath = path.join(process.env.SESSION_STORAGE_PATH || './sessions', sessionId);
+            
+            if (fs.existsSync(sessionPath)) {
+                // Remove entire session directory
+                fs.rmSync(sessionPath, { recursive: true, force: true });
+                logger.info('Session folder deleted', { sessionId, path: sessionPath });
+            }
+
             // Delete from database
             await this.database.deleteSession(sessionId);
             logger.info('Session deleted permanently', { sessionId });

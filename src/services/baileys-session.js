@@ -622,6 +622,22 @@ class BaileysSession {
         return this.isConnected;
     }
 
+    async logout() {
+        try {
+            if (this.socket && this.isConnected) {
+                // Send logout signal to WhatsApp
+                await this.socket.logout();
+                logger.session(this.sessionId, 'Session logout signal sent');
+            }
+            this.isConnected = false;
+            await this.updateSessionStatus('logged_out');
+            logger.session(this.sessionId, 'Session logged out successfully');
+        } catch (error) {
+            logger.error('Error during logout', { sessionId: this.sessionId, error: error.message });
+            throw error;
+        }
+    }
+
     async destroy() {
         try {
             if (this.socket) {

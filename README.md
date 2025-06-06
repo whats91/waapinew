@@ -395,6 +395,63 @@ Display QR code in server terminal for easy scanning.
 }
 ```
 
+---
+
+### 10. Logout Session
+Logout from WhatsApp (session can be reconnected later with QR code).
+
+**Endpoint:** `POST /api/logoutSession`
+
+**Request Body:**
+```json
+{
+  "authToken": "your-global-api-auth-token",
+  "senderId": "919876543210"
+}
+```
+
+**Response:**
+```json
+{
+  "success": true,
+  "message": "Session logged out successfully",
+  "data": {
+    "senderId": "919876543210",
+    "status": "logged_out",
+    "timestamp": "2024-01-01T00:00:00.000Z"
+  }
+}
+```
+
+---
+
+### 11. Delete Session
+Permanently delete session from database and remove session folder.
+
+**Endpoint:** `POST /api/deleteSession`
+
+**Request Body:**
+```json
+{
+  "authToken": "your-global-api-auth-token",
+  "senderId": "919876543210"
+}
+```
+
+**Response:**
+```json
+{
+  "success": true,
+  "message": "Session deleted successfully",
+  "data": {
+    "senderId": "919876543210",
+    "status": "deleted",
+    "timestamp": "2024-01-01T00:00:00.000Z",
+    "note": "Session removed from database and session folder deleted"
+  }
+}
+```
+
 ## 🏗️ Project Structure
 
 ```
@@ -457,6 +514,22 @@ docker run -p 3000:3000 whatsapp-api
 ```
 
 ## 📊 Session Management
+
+### Session Operations
+
+| Operation | Endpoint | Description | Recoverable |
+|-----------|----------|-------------|-------------|
+| **Create** | `POST /api/createSession` | Create new WhatsApp session | N/A |
+| **Logout** | `POST /api/logoutSession` | Logout from WhatsApp (keeps data) | ✅ Yes - scan QR again |
+| **Delete** | `POST /api/deleteSession` | Permanently remove session & folder | ❌ No - data lost forever |
+
+### Session Lifecycle
+
+1. **Create** → Session created in database
+2. **QR Scan** → WhatsApp authentication 
+3. **Connected** → Ready to send/receive messages
+4. **Logout** → Disconnected but can reconnect
+5. **Delete** → Permanently removed
 
 ### Session Storage Structure
 ```
