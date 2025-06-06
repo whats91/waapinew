@@ -859,7 +859,17 @@ router.post('/logoutSession', validateAuthToken, validateSenderId, checkSessionE
         
         logger.api('/logoutSession', 'Session logout requested', { senderId: finalSenderId });
         
-        await sessionManager.logoutSession(finalSenderId);
+        // Check if session is active in memory
+        const activeSession = await sessionManager.getSessionBySenderId(finalSenderId);
+        
+        if (activeSession) {
+            // Session is active in memory, perform proper logout
+            await sessionManager.logoutSession(finalSenderId);
+        } else {
+            // Session exists in database but not in memory, just update status
+            await sessionManager.database.updateSessionStatus(finalSenderId, 'logged_out');
+            logger.info('Session marked as logged out (was not active)', { sessionId: finalSenderId });
+        }
         
         res.json({
             success: true,

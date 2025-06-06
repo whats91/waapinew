@@ -165,12 +165,22 @@ class SessionManager {
 
     async logoutSession(sessionId) {
         const session = this.sessions.get(sessionId);
+        
         if (!session) {
-            throw new Error(`Session ${sessionId} not found`);
+            // Session not in memory, check if it exists in database
+            const sessionData = await this.database.getSession(sessionId);
+            if (!sessionData) {
+                throw new Error(`Session ${sessionId} not found in database`);
+            }
+            
+            // Session exists in database but not in memory, just update status
+            await this.database.updateSessionStatus(sessionId, 'logged_out');
+            logger.info('Session marked as logged out (was not active)', { sessionId });
+            return true;
         }
 
         try {
-            // Logout the session (this will trigger logged out status)
+            // Session is active in memory, perform proper logout
             await session.logout();
             this.sessions.delete(sessionId);
             
