@@ -452,6 +452,199 @@ Permanently delete session from database and remove session folder.
 }
 ```
 
+---
+
+## 🔗 Webhook Management API
+
+### 12. Update Webhook Configuration (Unified API)
+Update webhook URL and/or enable/disable webhook status in a single comprehensive API call.
+
+**Endpoint:** `POST /api/updateWebhook`
+
+#### Update Webhook URL Only
+```json
+{
+  "authToken": "your-global-api-auth-token",
+  "senderId": "919876543210",
+  "webhookUrl": "https://your-domain.com/webhook"
+}
+```
+
+#### Enable/Disable Webhook Only
+```json
+{
+  "authToken": "your-global-api-auth-token",
+  "senderId": "919876543210",
+  "webhookStatus": true
+}
+```
+
+#### Update Both URL and Status
+```json
+{
+  "authToken": "your-global-api-auth-token",
+  "senderId": "919876543210",
+  "webhookUrl": "https://your-domain.com/webhook",
+  "webhookStatus": true
+}
+```
+
+#### Alternative Parameter Names (Aliases)
+```json
+{
+  "authToken": "your-global-api-auth-token",
+  "sessionId": "919876543210",
+  "url": "https://your-domain.com/webhook",
+  "status": false
+}
+```
+
+```json
+{
+  "authToken": "your-global-api-auth-token",
+  "senderId": "919876543210",
+  "enabled": true
+}
+```
+
+**Response:**
+```json
+{
+  "success": true,
+  "message": "Webhook configuration updated successfully",
+  "data": {
+    "senderId": "919876543210",
+    "webhookUrl": "https://your-domain.com/webhook",
+    "webhookStatus": true,
+    "webhookEnabled": true,
+    "isActive": true,
+    "timestamp": "2024-01-01T00:00:00.000Z",
+    "sessionStatus": "connected",
+    "updated": {
+      "url": true,
+      "status": true
+    }
+  }
+}
+```
+
+#### Parameter Flexibility
+
+| Parameter | Aliases | Type | Description |
+|-----------|---------|------|-------------|
+| `senderId` | `sessionId` | String | Session identifier |
+| `webhookUrl` | `url` | String | Webhook URL (HTTP/HTTPS) |
+| `webhookStatus` | `status`, `enabled` | Boolean | Enable/disable webhook |
+
+**Features:**
+- ✅ Update URL only, status only, or both together
+- ✅ Multiple parameter aliases for flexibility
+- ✅ Preserves existing values when updating single field
+- ✅ URL validation for proper HTTP/HTTPS format
+- ✅ Boolean conversion for status parameters
+- ✅ Comprehensive response with current state
+
+---
+
+### 13. Test Webhook
+Test webhook endpoint with a sample message.
+
+**Endpoint:** `POST /api/testWebhook`
+
+**Request Body:**
+```json
+{
+  "authToken": "your-global-api-auth-token",
+  "senderId": "919876543210",
+  "webhookUrl": "https://your-domain.com/webhook"
+}
+```
+
+**Response:**
+```json
+{
+  "success": true,
+  "message": "Webhook test completed",
+  "data": {
+    "senderId": "919876543210",
+    "webhookTest": {
+      "success": true,
+      "status": 200,
+      "response": "OK"
+    }
+  }
+}
+```
+
+### Webhook Message Format
+
+When webhook is enabled, incoming messages are sent to your webhook URL in this format:
+
+```json
+{
+  "sessionId": "919876543210",
+  "messageId": "message-unique-id",
+  "remoteJid": "919876543211@s.whatsapp.net",
+  "fromMe": false,
+  "timestamp": 1640995200000,
+  "message": {
+    "type": "text",
+    "content": "Hello from WhatsApp!"
+  },
+  "participant": null,
+  "pushName": "John Doe"
+}
+```
+
+### Webhook Usage Examples
+
+**Set up webhook for first time:**
+```bash
+curl -X POST http://localhost:3000/api/updateWebhook \
+  -H "Content-Type: application/json" \
+  -d '{
+    "authToken": "your-token",
+    "senderId": "919876543210",
+    "webhookUrl": "https://your-domain.com/webhook",
+    "webhookStatus": true
+  }'
+```
+
+**Enable existing webhook:**
+```bash
+curl -X POST http://localhost:3000/api/updateWebhook \
+  -H "Content-Type: application/json" \
+  -d '{
+    "authToken": "your-token",
+    "senderId": "919876543210",
+    "status": true
+  }'
+```
+
+**Change webhook URL:**
+```bash
+curl -X POST http://localhost:3000/api/updateWebhook \
+  -H "Content-Type: application/json" \
+  -d '{
+    "authToken": "your-token",
+    "senderId": "919876543210",
+    "url": "https://new-domain.com/webhook"
+  }'
+```
+
+**Disable webhook:**
+```bash
+curl -X POST http://localhost:3000/api/updateWebhook \
+  -H "Content-Type: application/json" \
+  -d '{
+    "authToken": "your-token",
+    "senderId": "919876543210",
+    "enabled": false
+  }'
+```
+
+---
+
 ## 🏗️ Project Structure
 
 ```

@@ -619,40 +619,133 @@ router.get('/sessionStatus/:senderId', async (req, res) => {
 });
 
 // Update webhook configuration
-router.post('/updateWebhook', validateAuthToken, async (req, res) => {
+router.post('/updateWebhook', validateAuthToken, validateSenderId, checkSessionExists, async (req, res) => {
     try {
-        const { senderId, webhookUrl, webhookStatus } = req.body;
+        const { 
+            senderId, sessionId,                    // Session identifier (with alias support)
+            webhookUrl, url,                       // Webhook URL (with alias support)
+            webhookStatus, status, enabled         // Webhook status (with multiple alias support)
+        } = req.body;
         
-        if (!senderId) {
+        // Use aliases if main parameters are not provided
+        const finalSenderId = senderId || sessionId;
+        const finalWebhookUrl = webhookUrl || url;
+        let finalWebhookStatus = webhookStatus;
+        
+        // Handle multiple status parameter formats
+        if (finalWebhookStatus === undefined) {
+            if (status !== undefined) {
+                finalWebhookStatus = status;
+            } else if (enabled !== undefined) {
+                finalWebhookStatus = enabled;
+            }
+        }
+        
+        // Validate that at least one parameter is provided
+        if (finalWebhookUrl === undefined && finalWebhookStatus === undefined) {
             return res.status(400).json({
                 success: false,
-                message: 'Sender ID is required',
-                error: 'senderId is required'
+                message: 'Missing required parameters',
+                error: 'At least one of webhookUrl or webhookStatus (or their aliases) is required',
+                data: {
+                    senderId: finalSenderId,
+                    acceptedParameters: {
+                        webhookUrl: 'String - webhook URL (alias: url)',
+                        webhookStatus: 'Boolean - enable/disable webhook (aliases: status, enabled)'
+                    },
+                    examples: {
+                        updateUrlOnly: '{ "webhookUrl": "https://example.com/webhook" }',
+                        updateStatusOnly: '{ "webhookStatus": true }',
+                        updateBoth: '{ "webhookUrl": "https://example.com/webhook", "webhookStatus": true }'
+                    }
+                }
             });
         }
         
-        await sessionManager.updateWebhookConfig(senderId, webhookUrl, webhookStatus);
+        // Get current session data to preserve existing values
+        const currentSession = await sessionManager.database.getSession(finalSenderId);
+        if (!currentSession) {
+            return res.status(404).json({
+                success: false,
+                message: 'Session not found',
+                error: `Session not found for senderId: ${finalSenderId}`,
+                data: { senderId: finalSenderId }
+            });
+        }
         
-        logger.api('/updateWebhook', 'Webhook configuration updated', { 
-            senderId, 
-            webhookUrl, 
-            webhookStatus 
+        // Determine final values (use provided values or keep existing ones)
+        const updateWebhookUrl = finalWebhookUrl !== undefined ? finalWebhookUrl : currentSession.webhook_url;
+        const updateWebhookStatus = finalWebhookStatus !== undefined ? Boolean(finalWebhookStatus) : currentSession.webhook_status;
+        
+        // Validate webhook URL format if provided
+        if (finalWebhookUrl !== undefined && finalWebhookUrl !== null) {
+            if (typeof finalWebhookUrl !== 'string' || finalWebhookUrl.trim() === '') {
+                return res.status(400).json({
+                    success: false,
+                    message: 'Invalid webhook URL format',
+                    error: 'webhookUrl must be a non-empty string',
+                    data: {
+                        senderId: finalSenderId,
+                        provided: finalWebhookUrl,
+                        type: typeof finalWebhookUrl
+                    }
+                });
+            }
+            
+            try {
+                new URL(finalWebhookUrl);
+            } catch (urlError) {
+                return res.status(400).json({
+                    success: false,
+                    message: 'Invalid webhook URL format',
+                    error: 'webhookUrl must be a valid HTTP/HTTPS URL',
+                    data: {
+                        senderId: finalSenderId,
+                        webhookUrl: finalWebhookUrl,
+                        expectedFormat: 'https://your-domain.com/webhook'
+                    }
+                });
+            }
+        }
+        
+        logger.api('/updateWebhook', 'Webhook configuration update requested', { 
+            senderId: finalSenderId, 
+            webhookUrl: updateWebhookUrl,
+            webhookStatus: updateWebhookStatus,
+            fieldsUpdated: {
+                url: finalWebhookUrl !== undefined,
+                status: finalWebhookStatus !== undefined
+            }
         });
+        
+        // Update webhook configuration
+        await sessionManager.updateWebhookConfig(finalSenderId, updateWebhookUrl, updateWebhookStatus);
         
         res.json({
             success: true,
             message: 'Webhook configuration updated successfully',
             data: {
-                senderId: senderId
+                senderId: finalSenderId,
+                webhookUrl: updateWebhookUrl,
+                webhookStatus: updateWebhookStatus,
+                webhookEnabled: Boolean(updateWebhookStatus),
+                isActive: Boolean(updateWebhookStatus) && !!updateWebhookUrl,
+                timestamp: new Date().toISOString(),
+                sessionStatus: req.sessionData.status,
+                updated: {
+                    url: finalWebhookUrl !== undefined,
+                    status: finalWebhookStatus !== undefined
+                }
             }
         });
         
     } catch (error) {
-        logger.error('Error in /updateWebhook', { error: error.message });
+        logger.error('Error in /updateWebhook', { error: error.message, senderId: req.body?.senderId || req.body?.sessionId });
         res.status(500).json({
             success: false,
             message: 'Failed to update webhook configuration',
-            error: error.message
+            error: error.message,
+            senderId: req.body?.senderId || req.body?.sessionId
         });
     }
 });

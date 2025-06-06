@@ -72,8 +72,11 @@ app.get('/', (req, res) => {
                 'POST /api/sendMediaSMS': 'Send media message',
                 'POST /api/getGroups': 'Get WhatsApp groups',
                 'POST /api/getContacts': 'Get WhatsApp contacts',
-                'POST /api/updateWebhook': 'Update webhook configuration',
+                'POST /api/validateNumber': 'Validate if number is registered on WhatsApp',
+                'POST /api/updateWebhook': 'Update webhook URL and/or status (unified API)',
                 'POST /api/testWebhook': 'Test webhook endpoint',
+                'POST /api/logoutSession': 'Logout from WhatsApp session',
+                'POST /api/deleteSession': 'Permanently delete session and data',
                 'GET /api/sessionStatus/:senderId': 'Get session status by senderId',
                 'GET /api/stats': 'Get system statistics',
                 'GET /health': 'Health check endpoint'
