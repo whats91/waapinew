@@ -12,10 +12,164 @@ class SessionManager {
         this.maxSessions = parseInt(process.env.MAX_CONCURRENT_SESSIONS) || 100;
         this.isInitialized = false;
         
+        // Auto-refresh configuration from environment variables
+        this.sessionHealthCheckInterval = parseInt(process.env.SESSION_HEALTH_CHECK_INTERVAL) || 5 * 60 * 1000; // Default 5 minutes
+        this.maxSessionIdleTime = parseInt(process.env.MAX_SESSION_IDLE_TIME) || 30 * 60 * 1000; // Default 30 minutes
+        this.autoRefreshEnabled = process.env.AUTO_REFRESH_ENABLED !== 'false'; // Default true
+        this.sessionMaxRetries = parseInt(process.env.SESSION_MAX_RETRIES) || 5; // Default 5 retries
+        this.healthCheckTimer = null;
+        
         // Initialize existing sessions asynchronously but safely
         this.initializeExistingSessions().catch(error => {
             logger.error('Failed to initialize existing sessions during startup', { error: error.message });
         });
+        
+        // Start session health monitoring if enabled
+        if (this.autoRefreshEnabled) {
+            this.startSessionHealthMonitoring();
+        } else {
+            logger.info('Auto-refresh disabled via configuration');
+        }
+    }
+
+    startSessionHealthMonitoring() {
+        if (this.healthCheckTimer) {
+            clearInterval(this.healthCheckTimer);
+        }
+        
+        this.healthCheckTimer = setInterval(async () => {
+            try {
+                await this.performSessionHealthCheck();
+            } catch (error) {
+                logger.error('Error during session health check', { error: error.message });
+            }
+        }, this.sessionHealthCheckInterval);
+        
+        logger.info('Session health monitoring started', { 
+            interval: this.sessionHealthCheckInterval / 1000 + 's',
+            maxIdleTime: this.maxSessionIdleTime / 1000 + 's'
+        });
+    }
+
+    async performSessionHealthCheck() {
+        logger.info('Starting session health check', { totalSessions: this.sessions.size });
+        
+        for (const [sessionId, session] of this.sessions) {
+            try {
+                // Check if session is connected
+                if (!session.isSessionConnected()) {
+                    logger.warn('Session disconnected, attempting auto-reconnect', { sessionId });
+                    await this.autoReconnectSession(sessionId);
+                    continue;
+                }
+                
+                // Check session responsiveness
+                const isResponsive = await this.checkSessionResponsiveness(session);
+                if (!isResponsive) {
+                    logger.warn('Session unresponsive, attempting recovery', { sessionId });
+                    await this.recoverUnresponsiveSession(sessionId);
+                }
+                
+            } catch (error) {
+                logger.error('Error checking session health', { sessionId, error: error.message });
+            }
+        }
+        
+        logger.info('Session health check completed');
+    }
+
+    async checkSessionResponsiveness(session) {
+        try {
+            // Simple ping test - check if we can access socket state
+            if (!session.socket || !session.socket.user) {
+                return false;
+            }
+            
+            // Check if socket is in a healthy state
+            if (session.socket.readyState !== undefined && session.socket.readyState !== 1) {
+                return false;
+            }
+            
+            return true;
+        } catch (error) {
+            logger.error('Session responsiveness check failed', { 
+                sessionId: session.sessionId, 
+                error: error.message 
+            });
+            return false;
+        }
+    }
+
+    async autoReconnectSession(sessionId) {
+        try {
+            logger.info('Auto-reconnecting session', { sessionId });
+            
+            // Get session from memory
+            const session = this.sessions.get(sessionId);
+            if (!session) {
+                logger.warn('Session not found in memory for auto-reconnect', { sessionId });
+                return;
+            }
+            
+            // Destroy the old session
+            await session.destroy().catch(() => {}); // Ignore errors
+            
+            // Remove from memory
+            this.sessions.delete(sessionId);
+            
+            // Create new session
+            const newSession = new BaileysSession(sessionId, this.database, this.webhookManager);
+            this.sessions.set(sessionId, newSession);
+            
+            // Initialize with timeout
+            const initPromise = newSession.initialize();
+            const timeoutPromise = new Promise((_, reject) => 
+                setTimeout(() => reject(new Error('Initialization timeout')), 30000)
+            );
+            
+            await Promise.race([initPromise, timeoutPromise]);
+            
+            logger.info('Session auto-reconnected successfully', { sessionId });
+            
+        } catch (error) {
+            logger.error('Auto-reconnection failed', { sessionId, error: error.message });
+            
+            // Update database status
+            await this.database.updateSessionStatus(sessionId, 'failed').catch(() => {});
+            
+            // Remove from memory if initialization failed
+            this.sessions.delete(sessionId);
+        }
+    }
+
+    async recoverUnresponsiveSession(sessionId) {
+        try {
+            logger.info('Recovering unresponsive session', { sessionId });
+            await this.autoReconnectSession(sessionId);
+        } catch (error) {
+            logger.error('Session recovery failed', { sessionId, error: error.message });
+        }
+    }
+
+    async createOrRecoverSession(sessionId) {
+        // Enhanced session creation with automatic recovery
+        let session = this.sessions.get(sessionId);
+        
+        if (session) {
+            // Session exists, check if it's healthy
+            if (session.isSessionConnected()) {
+                return session;
+            } else {
+                // Session exists but disconnected, recover it
+                logger.info('Found disconnected session, attempting recovery', { sessionId });
+                await this.autoReconnectSession(sessionId);
+                return this.sessions.get(sessionId);
+            }
+        }
+        
+        // Session doesn't exist, create new one
+        await this.createSession(sessionId, false);
+        return this.sessions.get(sessionId);
     }
 
     async initializeExistingSessions() {
@@ -224,87 +378,125 @@ class SessionManager {
     }
 
     async sendTextMessage(senderId, receiverId, messageText) {
-        let session = this.sessions.get(senderId);
-        
-        if (!session) {
-            // Auto-initialize session if it doesn't exist
-            try {
-                await this.createSession(senderId, false);
-                session = this.sessions.get(senderId);
-                
-                // Wait for connection (with timeout)
-                await this.waitForConnection(session, 30000);
-            } catch (error) {
-                throw new Error(`Failed to initialize session for senderId ${senderId}: ${error.message}`);
+        try {
+            // Use enhanced session creation with auto-recovery
+            const session = await this.createOrRecoverSession(senderId);
+            
+            if (!session) {
+                throw new Error(`Failed to create or recover session for senderId ${senderId}`);
             }
-        }
 
-        if (!session.isSessionConnected()) {
-            throw new Error('Session not connected');
-        }
+            // Wait for connection with timeout
+            if (!session.isSessionConnected()) {
+                logger.info('Session not connected, waiting for connection', { senderId });
+                await this.waitForConnection(session, 30000);
+            }
 
-        return await session.sendTextMessage(receiverId, messageText);
+            return await session.sendTextMessage(receiverId, messageText);
+        } catch (error) {
+            logger.error('Error in sendTextMessage with auto-recovery', { 
+                senderId, 
+                receiverId, 
+                error: error.message 
+            });
+            
+            // If session fails, try one more time with fresh session
+            try {
+                logger.info('Retrying with fresh session', { senderId });
+                await this.autoReconnectSession(senderId);
+                const freshSession = this.sessions.get(senderId);
+                
+                if (freshSession && freshSession.isSessionConnected()) {
+                    return await freshSession.sendTextMessage(receiverId, messageText);
+                }
+            } catch (retryError) {
+                logger.error('Retry with fresh session also failed', { 
+                    senderId, 
+                    error: retryError.message 
+                });
+            }
+            
+            throw error;
+        }
     }
 
     async sendMediaMessage(senderId, receiverId, mediaBuffer, mediaType, caption = '') {
-        let session = this.sessions.get(senderId);
-        
-        if (!session) {
-            // Auto-initialize session if it doesn't exist
-            try {
-                await this.createSession(senderId, false);
-                session = this.sessions.get(senderId);
-                
-                // Wait for connection (with timeout)
-                await this.waitForConnection(session, 30000);
-            } catch (error) {
-                throw new Error(`Failed to initialize session for senderId ${senderId}: ${error.message}`);
+        try {
+            // Use enhanced session creation with auto-recovery
+            const session = await this.createOrRecoverSession(senderId);
+            
+            if (!session) {
+                throw new Error(`Failed to create or recover session for senderId ${senderId}`);
             }
-        }
 
-        if (!session.isSessionConnected()) {
-            throw new Error('Session not connected');
-        }
+            // Wait for connection with timeout
+            if (!session.isSessionConnected()) {
+                logger.info('Session not connected, waiting for connection', { senderId });
+                await this.waitForConnection(session, 30000);
+            }
 
-        return await session.sendMediaMessage(receiverId, mediaBuffer, mediaType, caption);
+            return await session.sendMediaMessage(receiverId, mediaBuffer, mediaType, caption);
+        } catch (error) {
+            logger.error('Error in sendMediaMessage with auto-recovery', { 
+                senderId, 
+                receiverId, 
+                error: error.message 
+            });
+            
+            // If session fails, try one more time with fresh session
+            try {
+                logger.info('Retrying with fresh session', { senderId });
+                await this.autoReconnectSession(senderId);
+                const freshSession = this.sessions.get(senderId);
+                
+                if (freshSession && freshSession.isSessionConnected()) {
+                    return await freshSession.sendMediaMessage(receiverId, mediaBuffer, mediaType, caption);
+                }
+            } catch (retryError) {
+                logger.error('Retry with fresh session also failed', { 
+                    senderId, 
+                    error: retryError.message 
+                });
+            }
+            
+            throw error;
+        }
     }
 
     async getQRCode(senderId) {
-        let session = this.sessions.get(senderId);
-        
-        if (!session) {
-            // Auto-initialize session if it doesn't exist
-            try {
-                await this.createSession(senderId, false);
-                session = this.sessions.get(senderId);
-                
-                // Wait for QR code generation (with timeout)
-                await this.waitForQRCode(session, 15000);
-            } catch (error) {
-                throw new Error(`Failed to initialize session for senderId ${senderId}: ${error.message}`);
+        try {
+            // Use enhanced session creation
+            const session = await this.createOrRecoverSession(senderId);
+            
+            if (!session) {
+                throw new Error(`Failed to create or recover session for senderId ${senderId}`);
             }
+            
+            // Wait for QR code generation with timeout
+            await this.waitForQRCode(session, 15000);
+            return session.getQRCode();
+        } catch (error) {
+            logger.error('Error in getQRCode with auto-recovery', { senderId, error: error.message });
+            throw error;
         }
-
-        return session.getQRCode();
     }
 
     async getQRString(senderId) {
-        let session = this.sessions.get(senderId);
-        
-        if (!session) {
-            // Auto-initialize session if it doesn't exist
-            try {
-                await this.createSession(senderId, false);
-                session = this.sessions.get(senderId);
-                
-                // Wait for QR code generation (with timeout)
-                await this.waitForQRCode(session, 15000);
-            } catch (error) {
-                throw new Error(`Failed to initialize session for senderId ${senderId}: ${error.message}`);
+        try {
+            // Use enhanced session creation
+            const session = await this.createOrRecoverSession(senderId);
+            
+            if (!session) {
+                throw new Error(`Failed to create or recover session for senderId ${senderId}`);
             }
+            
+            // Wait for QR code generation with timeout
+            await this.waitForQRCode(session, 15000);
+            return session.getQRString();
+        } catch (error) {
+            logger.error('Error in getQRString with auto-recovery', { senderId, error: error.message });
+            throw error;
         }
-
-        return session.getQRString();
     }
 
     async getGroups(senderId) {

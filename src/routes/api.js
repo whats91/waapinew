@@ -1032,4 +1032,141 @@ router.post('/deleteSession', validateAuthToken, validateSenderId, async (req, r
     }
 });
 
+// Manual session refresh endpoint
+router.post('/refreshSession', validateAuthToken, validateSenderId, checkSessionExists, async (req, res) => {
+    try {
+        const { senderId, sessionId } = req.body;
+        
+        // Use alias if main parameter is not provided
+        const finalSenderId = senderId || sessionId;
+        
+        logger.api('/refreshSession', 'Manual session refresh requested', { senderId: finalSenderId });
+        
+        // Force session reconnection
+        await sessionManager.autoReconnectSession(finalSenderId);
+        
+        const refreshedSession = await sessionManager.getSessionBySenderId(finalSenderId);
+        
+        res.json({
+            success: true,
+            message: 'Session refreshed successfully',
+            data: {
+                senderId: finalSenderId,
+                isConnected: refreshedSession ? refreshedSession.isSessionConnected() : false,
+                status: 'refreshed',
+                timestamp: new Date().toISOString(),
+                sessionStatus: req.sessionData.status
+            }
+        });
+        
+    } catch (error) {
+        logger.error('Error in /refreshSession', { error: error.message, senderId: req.body?.senderId || req.body?.sessionId });
+        res.status(500).json({
+            success: false,
+            message: 'Failed to refresh session',
+            error: error.message,
+            senderId: req.body?.senderId || req.body?.sessionId
+        });
+    }
+});
+
+// Session health check endpoint
+router.post('/checkSessionHealth', validateAuthToken, validateSenderId, async (req, res) => {
+    try {
+        const { senderId, sessionId } = req.body;
+        
+        // Use alias if main parameter is not provided
+        const finalSenderId = senderId || sessionId;
+        
+        logger.api('/checkSessionHealth', 'Session health check requested', { senderId: finalSenderId });
+        
+        const session = await sessionManager.getSessionBySenderId(finalSenderId);
+        const sessionData = await sessionManager.database.getSession(finalSenderId);
+        
+        if (!sessionData) {
+            return res.status(404).json({
+                success: false,
+                message: 'Session not found',
+                error: `Session not found for senderId: ${finalSenderId}`,
+                data: { senderId: finalSenderId }
+            });
+        }
+        
+        let healthStatus = 'unknown';
+        let isConnected = false;
+        let isResponsive = false;
+        
+        if (session) {
+            isConnected = session.isSessionConnected();
+            isResponsive = await sessionManager.checkSessionResponsiveness(session);
+            
+            if (isConnected && isResponsive) {
+                healthStatus = 'healthy';
+            } else if (isConnected && !isResponsive) {
+                healthStatus = 'unresponsive';
+            } else {
+                healthStatus = 'disconnected';
+            }
+        } else {
+            healthStatus = 'not_in_memory';
+        }
+        
+        res.json({
+            success: true,
+            message: 'Session health check completed',
+            data: {
+                senderId: finalSenderId,
+                healthStatus: healthStatus,
+                isConnected: isConnected,
+                isResponsive: isResponsive,
+                inMemory: !!session,
+                databaseStatus: sessionData.status,
+                lastUpdated: sessionData.updated_at,
+                autoRefreshEnabled: sessionManager.autoRefreshEnabled,
+                timestamp: new Date().toISOString()
+            }
+        });
+        
+    } catch (error) {
+        logger.error('Error in /checkSessionHealth', { error: error.message, senderId: req.body?.senderId || req.body?.sessionId });
+        res.status(500).json({
+            success: false,
+            message: 'Failed to check session health',
+            error: error.message,
+            senderId: req.body?.senderId || req.body?.sessionId
+        });
+    }
+});
+
+// Trigger global health check endpoint
+router.post('/triggerHealthCheck', validateAuthToken, async (req, res) => {
+    try {
+        logger.api('/triggerHealthCheck', 'Global health check triggered manually');
+        
+        // Trigger immediate health check
+        await sessionManager.performSessionHealthCheck();
+        
+        const stats = sessionManager.getSessionStats();
+        
+        res.json({
+            success: true,
+            message: 'Global health check completed',
+            data: {
+                timestamp: new Date().toISOString(),
+                sessionStats: stats,
+                autoRefreshEnabled: sessionManager.autoRefreshEnabled,
+                healthCheckInterval: sessionManager.sessionHealthCheckInterval / 1000 + 's'
+            }
+        });
+        
+    } catch (error) {
+        logger.error('Error in /triggerHealthCheck', { error: error.message });
+        res.status(500).json({
+            success: false,
+            message: 'Failed to trigger health check',
+            error: error.message
+        });
+    }
+});
+
 module.exports = { router, setSessionManager }; 

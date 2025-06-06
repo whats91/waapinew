@@ -23,11 +23,12 @@ class BaileysSession {
         this.qrCodeString = null;
         this.isConnected = false;
         this.retryCount = 0;
-        this.maxRetries = 3;
+        this.maxRetries = parseInt(process.env.SESSION_MAX_RETRIES) || 5; // Use configurable max retries
         this.sessionDir = path.join(process.env.SESSION_STORAGE_PATH || './sessions', sessionId);
         this.authDir = path.join(this.sessionDir, 'auth'); // All auth files will be stored in auth subfolder
         this.authState = null;
         this.saveCreds = null;
+        this.lastActivity = Date.now(); // Track last activity for health monitoring
         
         this.ensureSessionDirectory();
     }
@@ -152,10 +153,36 @@ class BaileysSession {
                         logger.error('Error updating session status to disconnected', { sessionId: this.sessionId, error: err.message });
                     });
 
-                    // Handle different disconnect reasons
+                    // Enhanced disconnect handling with better reconnection logic
                     if (statusCode === DisconnectReason.loggedOut) {
                         logger.session(this.sessionId, 'Session logged out, will not reconnect');
                         await this.updateSessionStatus('logged_out').catch(() => {});
+                    } else if (statusCode === DisconnectReason.restartRequired) {
+                        logger.session(this.sessionId, 'WhatsApp restart required, attempting reconnection');
+                        this.retryCount = 0; // Reset retry count for restart scenarios
+                        setTimeout(() => {
+                            this.initialize().catch(error => {
+                                logger.error('Restart reconnection failed', { sessionId: this.sessionId, error: error.message });
+                            });
+                        }, 2000);
+                    } else if (statusCode === DisconnectReason.connectionClosed || 
+                              statusCode === DisconnectReason.connectionLost ||
+                              statusCode === DisconnectReason.timedOut) {
+                        // Common network issues - retry immediately with exponential backoff
+                        if (this.retryCount < this.maxRetries) {
+                            this.retryCount++;
+                            const backoffTime = Math.min(1000 * Math.pow(2, this.retryCount - 1), 30000); // Max 30 seconds
+                            logger.session(this.sessionId, `Network disconnection, retrying in ${backoffTime}ms (${this.retryCount}/${this.maxRetries})`);
+                            
+                            setTimeout(() => {
+                                this.initialize().catch(error => {
+                                    logger.error('Network reconnection failed', { sessionId: this.sessionId, error: error.message });
+                                });
+                            }, backoffTime);
+                        } else {
+                            logger.session(this.sessionId, 'Max network retry attempts reached');
+                            await this.updateSessionStatus('failed').catch(() => {});
+                        }
                     } else if (shouldReconnect && this.retryCount < this.maxRetries) {
                         this.retryCount++;
                         logger.session(this.sessionId, `Attempting reconnection (${this.retryCount}/${this.maxRetries})`);
@@ -178,6 +205,7 @@ class BaileysSession {
                     console.log('✅ WHATSAPP SESSION CONNECTED SUCCESSFULLY!');
                     console.log(`📱 Session ID: ${this.sessionId.substring(0, 8)}...`);
                     console.log('🚀 Ready to send and receive messages');
+                    console.log('🔄 Auto-refresh monitoring active');
                     console.log('🎉'.repeat(20) + '\n');
                     
                     logger.session(this.sessionId, 'Session connected successfully');
@@ -194,6 +222,21 @@ class BaileysSession {
             } catch (error) {
                 logger.error('Error in connection.update handler', { sessionId: this.sessionId, error: error.message, stack: error.stack });
             }
+        });
+
+        // Enhanced error handling for socket events
+        this.socket.ev.on('messaging.update', (update) => {
+            try {
+                // Handle message updates if needed
+                logger.session(this.sessionId, 'Message update received', { update: update.length || 'unknown' });
+            } catch (error) {
+                logger.error('Error in messaging.update handler', { sessionId: this.sessionId, error: error.message });
+            }
+        });
+
+        // Add socket error handler
+        this.socket.ev.on('socket.error', (error) => {
+            logger.error('Socket error occurred', { sessionId: this.sessionId, error: error.message });
         });
 
         // Credentials update with error handling
