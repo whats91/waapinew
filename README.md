@@ -2,30 +2,33 @@
 
 A robust Node.js WhatsApp API integration using the Baileys library for managing up to 100 concurrent device sessions. This project provides RESTful APIs for sending messages, handling QR codes, fetching contacts and groups, and managing webhooks for incoming messages.
 
-## Features
+## 🚀 Features
 
 - 🚀 **Multi-Session Support**: Manage up to 100 concurrent WhatsApp sessions
-- 📱 **QR Code Authentication**: Easy WhatsApp Web authentication via QR codes
+- 📱 **QR Code Authentication**: Easy WhatsApp Web authentication via QR codes with terminal display
+- ✅ **WhatsApp Number Validation**: Automatic validation of phone numbers before sending messages
 - 💬 **Text & Media Messages**: Send text messages and media files (images, videos, documents, audio)
 - 👥 **Contacts & Groups**: Fetch WhatsApp contacts and groups
 - 🔗 **Webhook Support**: Configurable webhooks for incoming messages with retry logic
 - 📊 **Comprehensive Logging**: Detailed logging using Winston
-- 🗄️ **SQLite Database**: Persistent session storage
+- 🗄️ **SQLite Database**: Persistent session storage with organized auth folder structure
 - 🔄 **Auto-Reconnection**: Robust session management with automatic reconnection
 - 🐳 **Docker Ready**: Containerized deployment support
+- ⚡ **PM2 Support**: Production-ready process management
+- 📁 **Organized Storage**: Session files stored in `./sessions/sessionId/auth/` structure
 
-## Prerequisites
+## 📋 Prerequisites
 
 - Node.js 16.x or higher
 - npm or yarn
 - SQLite3
 
-## Installation
+## 🛠️ Installation
 
 1. **Clone the repository:**
 ```bash
-git clone <repository-url>
-cd whatsapp-api-baileys
+git clone https://github.com/whats91/waapinew.git
+cd waapinew
 ```
 
 2. **Install dependencies:**
@@ -34,7 +37,12 @@ npm install
 ```
 
 3. **Set up environment variables:**
-Create a `.env` file in the root directory:
+Copy and configure the environment file:
+```bash
+cp config.env .env
+```
+
+Edit `.env` file with your settings:
 ```env
 PORT=3000
 NODE_ENV=development
@@ -44,21 +52,27 @@ MAX_CONCURRENT_SESSIONS=100
 LOG_LEVEL=info
 WEBHOOK_TIMEOUT=5000
 WEBHOOK_RETRY_ATTEMPTS=3
+AUTH_TOKEN=your-global-api-auth-token-here
 ```
 
 4. **Start the server:**
 ```bash
+# Test setup
+npm run test-setup
+
 # Development mode with auto-restart
 npm run dev
 
 # Production mode
 npm start
-```
 
+# PM2 production deployment
+npm run pm2:start
+```
 
 The server will start on `http://localhost:3000`
 
-## API Documentation
+## 📚 API Documentation
 
 ### Base URL
 ```
@@ -66,7 +80,7 @@ http://localhost:3000/api
 ```
 
 ### Authentication
-Most endpoints require an `authToken` which is obtained when creating a session.
+All endpoints require a global `authToken` parameter in the request body.
 
 ---
 
@@ -78,6 +92,8 @@ Create a new WhatsApp session.
 **Request Body:**
 ```json
 {
+  "authToken": "your-global-api-auth-token",
+  "senderId": "919876543210",
   "name": "My Session",
   "userId": "user123",
   "webhookUrl": "https://your-webhook-url.com/webhook"
@@ -88,10 +104,11 @@ Create a new WhatsApp session.
 ```json
 {
   "success": true,
+  "message": "Session created successfully",
   "data": {
-    "sessionId": "uuid-session-id",
-    "authToken": "uuid-auth-token",
-    "message": "Session created successfully"
+    "sessionId": "919876543210",
+    "senderId": "919876543210", 
+    "status": "created"
   }
 }
 ```
@@ -99,14 +116,15 @@ Create a new WhatsApp session.
 ---
 
 ### 2. Get QR Code
-Get QR code for WhatsApp authentication.
+Get QR code for WhatsApp authentication with large terminal display.
 
 **Endpoint:** `POST /api/getQRCode`
 
 **Request Body:**
 ```json
 {
-  "authToken": "your-auth-token"
+  "authToken": "your-global-api-auth-token",
+  "senderId": "919876543210"
 }
 ```
 
@@ -114,25 +132,61 @@ Get QR code for WhatsApp authentication.
 ```json
 {
   "success": true,
+  "message": "QR code generated successfully",
   "data": {
     "qrCode": "data:image/png;base64,iVBORw0KGgoAAAANSU...",
-    "message": "Scan this QR code with WhatsApp to connect your session"
+    "senderId": "919876543210",
+    "message": "Scan this QR code with WhatsApp to connect your session",
+    "expiresIn": "~20 seconds"
   }
 }
 ```
 
 ---
 
-### 3. Send Text Message
-Send a text message to a WhatsApp number.
+### 3. Validate WhatsApp Number
+Check if a phone number is registered on WhatsApp before sending messages.
+
+**Endpoint:** `POST /api/validateNumber`
+
+**Request Body:**
+```json
+{
+  "authToken": "your-global-api-auth-token",
+  "senderId": "919876543210",
+  "phoneNumber": "919876543211"
+}
+```
+
+**Response:**
+```json
+{
+  "success": true,
+  "message": "Number is registered on WhatsApp",
+  "data": {
+    "senderId": "919876543210",
+    "phoneNumber": "919876543211",
+    "formattedJID": "919876543211@s.whatsapp.net",
+    "isRegistered": true,
+    "isGroup": false,
+    "validationFailed": false
+  }
+}
+```
+
+---
+
+### 4. Send Text Message
+Send a text message to a WhatsApp number with automatic validation.
 
 **Endpoint:** `POST /api/sendTextSMS`
 
 **Request Body:**
 ```json
 {
-  "authToken": "your-auth-token",
-  "receiverId": "1234567890@s.whatsapp.net",
+  "authToken": "your-global-api-auth-token",
+  "senderId": "919876543210",
+  "receiverId": "919876543211",
   "messageText": "Hello, this is a test message!"
 }
 ```
@@ -141,35 +195,35 @@ Send a text message to a WhatsApp number.
 ```json
 {
   "success": true,
+  "message": "Text message sent successfully",
   "data": {
     "messageId": "message-unique-id",
-    "message": "Text message sent successfully"
+    "senderId": "919876543210",
+    "receiverId": "919876543211",
+    "messageLength": 33,
+    "validation": {
+      "isRegistered": true,
+      "isGroup": false,
+      "formattedJID": "919876543211@s.whatsapp.net",
+      "validationPassed": true
+    }
   }
 }
 ```
 
 ---
 
-### 4. Send Media Message
-Send media files (images, videos, documents, audio).
+### 5. Send Media Message
+Send media files with automatic validation and URL support.
 
 **Endpoint:** `POST /api/sendMediaSMS`
 
-**Request:** Form-data or JSON
-
-**Option 1: File Upload (Form-data)**
-```
-authToken: your-auth-token
-receiverId: 1234567890@s.whatsapp.net
-media: [file upload]
-caption: Optional caption for the media
-```
-
-**Option 2: Media URL (JSON)**
+**Request Body:**
 ```json
 {
-  "authToken": "your-auth-token",
-  "receiverId": "1234567890@s.whatsapp.net",
+  "authToken": "your-global-api-auth-token",
+  "senderId": "919876543210", 
+  "receiverId": "919876543211",
   "mediaurl": "https://example.com/image.jpg",
   "caption": "Optional caption for the media"
 }
@@ -179,16 +233,27 @@ caption: Optional caption for the media
 ```json
 {
   "success": true,
+  "message": "Media message sent successfully",
   "data": {
     "messageId": "message-unique-id",
-    "message": "Media message sent successfully"
+    "senderId": "919876543210",
+    "receiverId": "919876543211",
+    "mediaurl": "https://example.com/image.jpg",
+    "mediaType": "image/jpeg",
+    "caption": "Optional caption",
+    "validation": {
+      "isRegistered": true,
+      "isGroup": false,
+      "formattedJID": "919876543211@s.whatsapp.net",
+      "validationPassed": true
+    }
   }
 }
 ```
 
 ---
 
-### 5. Get Groups
+### 6. Get Groups
 Fetch WhatsApp groups for the authenticated session.
 
 **Endpoint:** `POST /api/getGroups`
@@ -196,7 +261,8 @@ Fetch WhatsApp groups for the authenticated session.
 **Request Body:**
 ```json
 {
-  "authToken": "your-auth-token"
+  "authToken": "your-global-api-auth-token",
+  "senderId": "919876543210"
 }
 ```
 
@@ -204,26 +270,26 @@ Fetch WhatsApp groups for the authenticated session.
 ```json
 {
   "success": true,
+  "message": "Groups retrieved successfully",
   "data": {
     "groups": [
       {
-        "id": "group-id@g.us",
-        "subject": "Group Name",
-        "owner": "owner@s.whatsapp.net",
-        "desc": "Group description",
-        "participants": 5,
-        "creation": 1234567890
+        "id": "120363168346132205@g.us",
+        "subject": "My WhatsApp Group",
+        "owner": "919876543210@s.whatsapp.net",
+        "participants": 15,
+        "creation": 1634567890,
+        "desc": "Group description"
       }
     ],
-    "count": 1,
-    "message": "Groups fetched successfully"
+    "count": 1
   }
 }
 ```
 
 ---
 
-### 6. Get Contacts
+### 7. Get Contacts
 Fetch WhatsApp contacts for the authenticated session.
 
 **Endpoint:** `POST /api/getContacts`
@@ -231,7 +297,8 @@ Fetch WhatsApp contacts for the authenticated session.
 **Request Body:**
 ```json
 {
-  "authToken": "your-auth-token"
+  "authToken": "your-global-api-auth-token",
+  "senderId": "919876543210"
 }
 ```
 
@@ -239,251 +306,230 @@ Fetch WhatsApp contacts for the authenticated session.
 ```json
 {
   "success": true,
+  "message": "Contacts retrieved successfully", 
   "data": {
     "contacts": [
       {
-        "id": "contact@s.whatsapp.net",
-        "name": "Contact Name",
-        "notify": "Display Name",
-        "verifiedName": "Verified Name",
-        "imgUrl": "profile-pic-url",
-        "status": "Hey there! I am using WhatsApp."
+        "id": "919876543211@s.whatsapp.net",
+        "name": "John Doe",
+        "notify": "John",
+        "verifiedName": "John Doe"
       }
     ],
-    "count": 1,
-    "message": "Contacts fetched successfully"
+    "count": 1
   }
 }
 ```
 
 ---
 
-### 7. Update Webhook Configuration
-Configure webhook settings for a session.
+### 8. Session Status
+Get the current status of a session.
 
-**Endpoint:** `POST /api/updateWebhook`
-
-**Request Body:**
-```json
-{
-  "authToken": "your-auth-token",
-  "webhookUrl": "https://your-webhook-url.com/webhook",
-  "webhookStatus": true
-}
-```
+**Endpoint:** `GET /api/sessionStatus/:senderId?authToken=your-token`
 
 **Response:**
 ```json
 {
   "success": true,
+  "message": "Session status retrieved successfully",
   "data": {
-    "message": "Webhook configuration updated successfully"
-  }
-}
-```
-
----
-
-### 8. Test Webhook
-Test webhook endpoint connectivity.
-
-**Endpoint:** `POST /api/testWebhook`
-
-**Request Body:**
-```json
-{
-  "authToken": "your-auth-token",
-  "webhookUrl": "https://your-webhook-url.com/webhook"
-}
-```
-
----
-
-### 9. Get Session Status
-Check the status of a session.
-
-**Endpoint:** `GET /api/sessionStatus/:authToken`
-
-**Response:**
-```json
-{
-  "success": true,
-  "data": {
+    "senderId": "919876543210",
     "isConnected": true,
     "hasQRCode": false,
-    "message": "Session status retrieved"
+    "databaseStatus": "connected"
   }
 }
 ```
 
 ---
 
-### 10. Get System Statistics
-Get system and session statistics.
+### 9. Display QR in Terminal
+Display QR code in server terminal for easy scanning.
 
-**Endpoint:** `GET /api/stats`
+**Endpoint:** `POST /api/displayQR`
+
+**Request Body:**
+```json
+{
+  "authToken": "your-global-api-auth-token",
+  "senderId": "919876543210"
+}
+```
+
+## 🏗️ Project Structure
+
+```
+whatsapp-api-baileys/
+├── src/
+│   ├── database/
+│   │   └── db.js                 # SQLite database operations
+│   │   
+│   ├── routes/
+│   │   └── api.js                # API endpoints
+│   │   
+│   ├── services/
+│   │   ├── baileys-session.js    # WhatsApp session management
+│   │   ├── session-manager.js    # Multi-session coordinator
+│   │   └── webhook-manager.js    # Webhook handling
+│   │   
+│   ├── utils/
+│   │   └── logger.js             # Winston logger configuration
+│   │   
+│   └── server.js                 # Express server
+├── sessions/                     # Session storage
+│   └── {sessionId}/
+│       └── auth/                 # Authentication files
+├── data/                         # Database files
+├── logs/                         # Application logs
+├── ecosystem.config.js           # PM2 configuration
+├── docker-compose.yml           # Docker composition
+├── Dockerfile                   # Docker container
+└── package.json                # Dependencies
+```
+
+## 🚀 Deployment
+
+### Using PM2 (Recommended)
+```bash
+# Install PM2 globally
+npm install -g pm2
+
+# Start with PM2
+npm run pm2:start
+
+# Monitor
+npm run pm2:monit
+
+# View logs
+npm run pm2:logs
+
+# Stop
+npm run pm2:stop
+```
+
+### Using Docker
+```bash
+# Build and run with docker-compose
+docker-compose up -d
+
+# Or build manually
+docker build -t whatsapp-api .
+docker run -p 3000:3000 whatsapp-api
+```
+
+## 📊 Session Management
+
+### Session Storage Structure
+```
+./sessions/
+├── {senderId}/
+│   └── auth/
+│       ├── creds.json
+│       ├── session-*.json
+│       ├── pre-key-*.json
+│       └── app-state-sync-*.json
+```
+
+### Database Schema
+```sql
+-- Sessions table
+CREATE TABLE sessions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    session_id TEXT UNIQUE NOT NULL,
+    name TEXT,
+    auth_token TEXT,
+    status TEXT DEFAULT 'disconnected',
+    auto_read BOOLEAN DEFAULT 0,
+    webhook_status BOOLEAN DEFAULT 0,
+    webhook_url TEXT,
+    user_id TEXT,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+);
+```
+
+## 🔧 Configuration
+
+### Environment Variables
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `PORT` | Server port | `3000` |
+| `NODE_ENV` | Environment | `development` |
+| `DB_PATH` | Database path | `./data/whatsapp_sessions.db` |
+| `SESSION_STORAGE_PATH` | Sessions directory | `./sessions` |
+| `MAX_CONCURRENT_SESSIONS` | Max sessions | `100` |
+| `AUTH_TOKEN` | Global API auth token | Required |
+| `LOG_LEVEL` | Logging level | `info` |
+| `WEBHOOK_TIMEOUT` | Webhook timeout (ms) | `5000` |
+| `WEBHOOK_RETRY_ATTEMPTS` | Webhook retries | `3` |
+
+## 🛡️ Security Features
+
+- Global authentication token for API access
+- WhatsApp number validation to prevent spam
+- Session isolation with individual auth folders
+- Webhook retry logic with exponential backoff
+- Comprehensive error handling and logging
+- Process-level error handlers to prevent crashes
+
+## 🚦 Health Check
+
+**Endpoint:** `GET /health`
 
 **Response:**
 ```json
 {
-  "success": true,
-  "data": {
-    "totalSessions": 3,
-    "connectedSessions": 2,
-    "disconnectedSessions": 1,
-    "maxSessions": 100,
-    "availableSlots": 97
-  }
+  "status": "OK",
+  "timestamp": "2024-01-01T00:00:00.000Z",
+  "uptime": "0:05:30",
+  "service": "WhatsApp API",
+  "version": "1.0.0"
 }
 ```
 
-## Webhook Format
-
-When a webhook is configured, incoming messages will be sent to your webhook URL in this format:
-
-```json
-{
-  "sessionId": "session-uuid",
-  "messageId": "message-id",
-  "remoteJid": "sender@s.whatsapp.net",
-  "fromMe": false,
-  "timestamp": 1634567890,
-  "message": {
-    "type": "text",
-    "content": "Hello, this is an incoming message"
-  },
-  "participant": null,
-  "pushName": "Sender Name"
-}
-```
-
-## Phone Number Format
-
-WhatsApp JID (Jabber ID) format:
-- **Individual:** `1234567890@s.whatsapp.net`
-- **Group:** `groupid@g.us`
-- **Broadcast:** `broadcastid@broadcast.whatsapp.net`
-
-## Error Handling
-
-All API responses follow this format:
-
-**Success Response:**
-```json
-{
-  "success": true,
-  "data": { ... }
-}
-```
-
-**Error Response:**
-```json
-{
-  "success": false,
-  "error": "Error message description"
-}
-```
-
-Common HTTP status codes:
-- `200` - Success
-- `400` - Bad Request (missing parameters, validation errors)
-- `404` - Not Found (session not found, endpoint not found)
-- `500` - Internal Server Error
-
-## Logging
+## 📝 Logging
 
 The application uses Winston for comprehensive logging:
 
-- **Logs Directory:** `./logs/`
-- **Log Files:**
-  - `combined.log` - All logs
-  - `error.log` - Error logs only
-  - `sessions.log` - Session-specific logs
+- **Error logs**: `./logs/error.log`
+- **Combined logs**: `./logs/combined.log`  
+- **Session logs**: `./logs/sessions.log`
+- **PM2 logs**: `./logs/pm2-*.log`
 
-Log levels: `error`, `warn`, `info`, `verbose`, `debug`
-
-## Docker Deployment
-
-Build and run with Docker:
-
-```bash
-# Build the image
-docker build -t whatsapp-api .
-
-# Run the container
-docker run -p 3000:3000 -v $(pwd)/data:/app/data -v $(pwd)/sessions:/app/sessions whatsapp-api
-```
-
-## Performance Considerations
-
-- **Memory Usage:** Each session consumes approximately 50-100MB of RAM
-- **Concurrent Sessions:** Tested up to 100 concurrent sessions
-- **Database:** SQLite is suitable for moderate loads; consider PostgreSQL/MySQL for high-scale deployments
-- **Session Storage:** Session files are stored locally; use network storage for multi-instance deployments
-
-## Security Best Practices
-
-1. **Environment Variables:** Never commit `.env` files to version control
-2. **Auth Tokens:** Treat auth tokens as sensitive credentials
-3. **Webhook URLs:** Use HTTPS for webhook endpoints
-4. **Rate Limiting:** Implement rate limiting for production deployments
-5. **Firewall:** Restrict access to the API endpoints as needed
-
-## Troubleshooting
+## 🐛 Troubleshooting
 
 ### Common Issues
 
-1. **QR Code Not Generating:**
-   - Check if session is already connected
-   - Ensure WhatsApp Web is not open elsewhere
-   - Try creating a new session
-
-2. **Messages Not Sending:**
-   - Verify session is connected (`/api/sessionStatus`)
-   - Check recipient number format
-   - Ensure WhatsApp account is not banned
-
-3. **Webhook Not Working:**
-   - Test webhook URL accessibility
-   - Check webhook configuration
-   - Review logs for delivery attempts
-
-4. **High Memory Usage:**
-   - Monitor session count
-   - Implement session cleanup for inactive sessions
-   - Consider session rotation
+1. **QR Code not generating**: Ensure session is created and not already connected
+2. **Messages failing**: Check number validation and session connection status
+3. **Session disconnections**: Check logs for specific error messages
+4. **Database errors**: Ensure proper permissions on `./data/` directory
 
 ### Debug Mode
-
-Enable debug logging:
-```env
-LOG_LEVEL=debug
-NODE_ENV=development
+```bash
+LOG_LEVEL=debug npm start
 ```
 
-## Contributing
+## 🤝 Contributing
 
 1. Fork the repository
-2. Create your feature branch (`git checkout -b feature/amazing-feature`)
-3. Commit your changes (`git commit -m 'Add some amazing feature'`)
-4. Push to the branch (`git push origin feature/amazing-feature`)
-5. Open a Pull Request
+2. Create a feature branch
+3. Make your changes
+4. Add tests if applicable
+5. Submit a pull request
 
-## License
+## 📄 License
 
-This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
+This project is licensed under the MIT License.
 
-## Disclaimer
+## 🆘 Support
 
-This project is for educational and development purposes. Make sure to comply with WhatsApp's Terms of Service and local regulations when using this software. The authors are not responsible for any misuse of this software.
-
-## Support
-
-For questions and support:
-1. Check the [Issues](https://github.com/your-repo/issues) section
-2. Review the logs in `./logs/` directory
-3. Enable debug logging for detailed troubleshooting
+For issues and questions:
+- Create an issue on GitHub
+- Check the logs for detailed error information
+- Ensure all prerequisites are met
 
 ---
 
-**Built with ❤️ using [Baileys](https://github.com/WhiskeySockets/Baileys)** 
+**Built with ❤️ using [Baileys](https://github.com/WhiskeySockets/Baileys) WhatsApp library**
