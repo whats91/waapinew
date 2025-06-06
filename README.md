@@ -177,17 +177,27 @@ Check if a phone number is registered on WhatsApp before sending messages.
 ---
 
 ### 4. Send Text Message
-Send a text message to a WhatsApp number with automatic validation.
+Send a text message to a WhatsApp number or group with automatic validation.
 
 **Endpoint:** `POST /api/sendTextSMS`
 
-**Request Body:**
+**Individual Chat:**
 ```json
 {
   "authToken": "your-global-api-auth-token",
   "senderId": "919876543210",
   "receiverId": "919876543211",
   "messageText": "Hello, this is a test message!"
+}
+```
+
+**Group Chat:**
+```json
+{
+  "authToken": "your-global-api-auth-token",
+  "senderId": "919876543210",
+  "receiverId": "120363168346132205",
+  "messageText": "Hello everyone in the group!"
 }
 ```
 
@@ -214,11 +224,11 @@ Send a text message to a WhatsApp number with automatic validation.
 ---
 
 ### 5. Send Media Message
-Send media files with automatic validation and URL support.
+Send media files with automatic validation and URL support to individuals or groups.
 
 **Endpoint:** `POST /api/sendMediaSMS`
 
-**Request Body:**
+**Individual Chat:**
 ```json
 {
   "authToken": "your-global-api-auth-token",
@@ -226,6 +236,17 @@ Send media files with automatic validation and URL support.
   "receiverId": "919876543211",
   "mediaurl": "https://example.com/image.jpg",
   "caption": "Optional caption for the media"
+}
+```
+
+**Group Chat:**
+```json
+{
+  "authToken": "your-global-api-auth-token",
+  "senderId": "919876543210",
+  "receiverId": "120363168346132205",
+  "mediaurl": "https://example.com/image.jpg",
+  "caption": "Sharing this image with the group!"
 }
 ```
 
@@ -250,6 +271,23 @@ Send media files with automatic validation and URL support.
   }
 }
 ```
+
+#### Supported Receiver ID Formats
+
+The API automatically detects and formats receiver IDs for both individual chats and groups:
+
+| Format Type | Example | Description |
+|-------------|---------|-------------|
+| **Phone Number** | `919876543210` | Individual WhatsApp number |
+| **Phone JID** | `919876543210@s.whatsapp.net` | Formatted individual chat |
+| **Group ID** | `120363168346132205` | WhatsApp group identifier |
+| **Group JID** | `120363168346132205@g.us` | Formatted group chat |
+| **Group with Hyphens** | `1234567890-1234567890` | Alternative group ID format |
+
+**Auto-Detection Rules:**
+- Numbers 8-15 digits → Individual chat (`@s.whatsapp.net`)
+- IDs >15 characters with hyphens or >18 digits → Group chat (`@g.us`)
+- Already formatted JIDs → Used as-is
 
 ---
 

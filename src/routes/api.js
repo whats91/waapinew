@@ -235,15 +235,26 @@ router.post('/sendTextSMS', validateAuthToken, validateSenderId, checkSessionExi
         
         // Validate receiverId format
         if (!finalReceiverId.includes('@') && !isValidSenderId(finalReceiverId)) {
-            return res.status(400).json({
-                success: false,
-                message: 'Invalid receiver ID format',
-                error: 'Invalid receiverId/number format. Must be a valid phone number or WhatsApp JID',
-                data: {
-                    senderId: finalSenderId,
-                    receiverId: finalReceiverId
-                }
-            });
+            // Check if it might be a group ID (longer than 15 characters with hyphens or long numeric)
+            const isGroupId = finalReceiverId.length > 15 && (finalReceiverId.includes('-') || /^\d{18,}$/.test(finalReceiverId));
+            
+            if (!isGroupId) {
+                return res.status(400).json({
+                    success: false,
+                    message: 'Invalid receiver ID format',
+                    error: 'Invalid receiverId/number format. Must be a valid phone number, group ID, or WhatsApp JID',
+                    data: {
+                        senderId: finalSenderId,
+                        receiverId: finalReceiverId,
+                        expectedFormats: [
+                            "Phone number: 919876543210",
+                            "Group ID: 120363168346132205",
+                            "WhatsApp JID: 919876543210@s.whatsapp.net",
+                            "Group JID: 120363168346132205@g.us"
+                        ]
+                    }
+                });
+            }
         }
         
         logger.api('/sendTextSMS', 'Text message send requested', { 
@@ -317,15 +328,26 @@ router.post('/sendMediaSMS', validateAuthToken, validateSenderId, checkSessionEx
         
         // Validate receiverId format
         if (!finalReceiverId.includes('@') && !isValidSenderId(finalReceiverId)) {
-            return res.status(400).json({
-                success: false,
-                message: 'Invalid receiver ID format',
-                error: 'Invalid receiverId/number format. Must be a valid phone number or WhatsApp JID',
-                data: {
-                    senderId: finalSenderId,
-                    receiverId: finalReceiverId
-                }
-            });
+            // Check if it might be a group ID (longer than 15 characters with hyphens or long numeric)
+            const isGroupId = finalReceiverId.length > 15 && (finalReceiverId.includes('-') || /^\d{18,}$/.test(finalReceiverId));
+            
+            if (!isGroupId) {
+                return res.status(400).json({
+                    success: false,
+                    message: 'Invalid receiver ID format',
+                    error: 'Invalid receiverId/number format. Must be a valid phone number, group ID, or WhatsApp JID',
+                    data: {
+                        senderId: finalSenderId,
+                        receiverId: finalReceiverId,
+                        expectedFormats: [
+                            "Phone number: 919876543210",
+                            "Group ID: 120363168346132205",
+                            "WhatsApp JID: 919876543210@s.whatsapp.net",
+                            "Group JID: 120363168346132205@g.us"
+                        ]
+                    }
+                });
+            }
         }
         
         // Validate mediaurl format

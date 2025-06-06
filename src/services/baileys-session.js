@@ -361,41 +361,71 @@ class BaileysSession {
         return { type: 'unknown', raw: messageContent };
     }
 
-    // Utility function to format phone number as WhatsApp JID
-    formatAsWhatsAppJID(phoneNumber) {
-        // Remove any non-digit characters
-        const cleanNumber = phoneNumber.replace(/[^\d]/g, '');
-        
-        // If it already ends with @s.whatsapp.net or @g.us, return as is
-        if (phoneNumber.includes('@')) {
-            return phoneNumber;
+    // Utility function to format phone number or group ID as WhatsApp JID
+    formatAsWhatsAppJID(receiverId) {
+        // If already formatted with proper WhatsApp domain, return as is
+        if (receiverId.endsWith('@g.us') || receiverId.endsWith('@s.whatsapp.net')) {
+            return receiverId;
         }
         
-        // For individual chats, add @s.whatsapp.net
-        // For group chats, they typically end with @g.us, but we'll handle that separately
-        return `${cleanNumber}@s.whatsapp.net`;
+        // If it contains @ but not the proper WhatsApp domains, extract the ID part
+        if (receiverId.includes('@')) {
+            receiverId = receiverId.split('@')[0];
+        }
+        
+        // Determine if it's a group ID or individual phone number
+        let formattedJID;
+        
+        // Group IDs are typically longer than 15 characters and contain hyphens or are numeric with specific patterns
+        // Examples: "120363168346132205", "1234567890-1234567890", etc.
+        if (receiverId.length > 15 && (receiverId.includes('-') || /^\d{18,}$/.test(receiverId))) {
+            // This appears to be a group ID
+            formattedJID = receiverId + '@g.us';
+        } else if (/^\d{8,15}$/.test(receiverId)) {
+            // This appears to be an individual phone number (8-15 digits)
+            formattedJID = receiverId + '@s.whatsapp.net';
+        } else {
+            // For any other format, try to clean and determine
+            const cleanId = receiverId.replace(/[^\d\-]/g, ''); // Keep digits and hyphens
+            
+            if (cleanId.length > 15 && cleanId.includes('-')) {
+                // Likely a group ID with hyphens
+                formattedJID = cleanId + '@g.us';
+            } else if (cleanId.length >= 8) {
+                // Likely a phone number
+                const cleanNumber = cleanId.replace(/[^\d]/g, ''); // Remove all non-digits for phone numbers
+                formattedJID = cleanNumber + '@s.whatsapp.net';
+            } else {
+                // Default to individual chat if uncertain
+                formattedJID = receiverId + '@s.whatsapp.net';
+            }
+        }
+        
+        return formattedJID;
     }
 
     // Check if a phone number is registered on WhatsApp
-    async isNumberRegisteredOnWhatsApp(phoneNumber) {
+    async isNumberRegisteredOnWhatsApp(receiverId) {
         if (!this.isConnected) {
             throw new Error('Session not connected');
         }
 
         try {
-            // Format the phone number as WhatsApp JID
-            const formattedJID = this.formatAsWhatsAppJID(phoneNumber);
+            // Format the receiverId as a proper WhatsApp JID
+            const formattedJID = this.formatAsWhatsAppJID(receiverId);
             
-            // Skip validation for group chats
+            // Skip validation for group chats - groups are always "valid" if they exist
             if (formattedJID.includes('@g.us')) {
+                logger.session(this.sessionId, 'Group chat detected, skipping validation', { groupId: formattedJID });
                 return {
                     isRegistered: true,
                     jid: formattedJID,
-                    isGroup: true
+                    isGroup: true,
+                    validationSkipped: true
                 };
             }
 
-            // Use onWhatsApp method to check if number is registered
+            // Use onWhatsApp method to check if individual number is registered
             const [result] = await this.socket.onWhatsApp(formattedJID);
             
             if (result && result.exists) {
@@ -416,16 +446,17 @@ class BaileysSession {
         } catch (error) {
             logger.error('Error validating WhatsApp number', { 
                 sessionId: this.sessionId, 
-                phoneNumber, 
+                receiverId, 
                 error: error.message 
             });
             
             // If validation fails, assume number is valid to avoid blocking legitimate sends
             // This could happen due to network issues or rate limiting
+            const formattedJID = this.formatAsWhatsAppJID(receiverId);
             return {
                 isRegistered: true,
-                jid: this.formatAsWhatsAppJID(phoneNumber),
-                isGroup: false,
+                jid: formattedJID,
+                isGroup: formattedJID.includes('@g.us'),
                 validationFailed: true,
                 error: error.message
             };
