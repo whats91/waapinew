@@ -1,0 +1,61 @@
+version: '3.8'
+
+services:
+  whatsapp-api:
+    build: .
+    container_name: whatsapp-api-baileys
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    environment:
+      - NODE_ENV=production
+      - PORT=3000
+      - DB_PATH=./data/whatsapp_sessions.db
+      - SESSION_STORAGE_PATH=./sessions
+      - MAX_CONCURRENT_SESSIONS=100
+      - LOG_LEVEL=info
+      - WEBHOOK_TIMEOUT=5000
+      - WEBHOOK_RETRY_ATTEMPTS=3
+    volumes:
+      # Persist data, sessions, and logs
+      - ./data:/app/data
+      - ./sessions:/app/sessions
+      - ./logs:/app/logs
+      # Optional: Mount uploads directory if you want to persist uploaded files
+      - ./uploads:/app/uploads
+    networks:
+      - whatsapp-network
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:3000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+
+  # Optional: Add nginx for reverse proxy and load balancing
+  # nginx:
+  #   image: nginx:alpine
+  #   container_name: whatsapp-api-nginx
+  #   restart: unless-stopped
+  #   ports:
+  #     - "80:80"
+  #     - "443:443"
+  #   volumes:
+  #     - ./nginx.conf:/etc/nginx/nginx.conf:ro
+  #     - ./ssl:/etc/nginx/ssl:ro
+  #   depends_on:
+  #     - whatsapp-api
+  #   networks:
+  #     - whatsapp-network
+
+networks:
+  whatsapp-network:
+    driver: bridge
+
+volumes:
+  data:
+    driver: local
+  sessions:
+    driver: local
+  logs:
+    driver: local 

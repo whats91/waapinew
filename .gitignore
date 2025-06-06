@@ -1,0 +1,12 @@
+node_modules/
+.env
+*.log
+logs/
+data/
+sessions/
+uploads/
+.DS_Store
+*.sqlite
+*.db
+auth_info_baileys/
+temp/ 
