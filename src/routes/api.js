@@ -127,7 +127,8 @@ router.post('/getQRCode', validateAuthToken, validateSenderId, async (req, res) 
         // Additional validation - ensure session exists or can be created
         logger.api('/getQRCode', 'QR code requested', { senderId });
         
-        const qrCodeData = await sessionManager.getQRCode(senderId);
+        // Use the new API-specific method that doesn't trigger auto-recovery
+        const qrCodeData = await sessionManager.getQRCodeForAPI(senderId);
         
         if (!qrCodeData) {
             return res.status(404).json({
@@ -141,46 +142,8 @@ router.post('/getQRCode', validateAuthToken, validateSenderId, async (req, res) 
             });
         }
 
-        // Display QR code in terminal for easy scanning
-        try {
-            const QRCode = require('qrcode');
-            
-            // Get the original QR string for terminal display
-            const qrString = await sessionManager.getQRString(senderId);
-            
-            console.log('\n' + '='.repeat(80));
-            console.log('🌐 API QR CODE REQUEST - SCAN WITH YOUR PHONE');
-            console.log(`🔗 Sender ID: ${senderId}`);
-            console.log(`📡 API Endpoint: POST /api/getQRCode`);
-            console.log(`🕐 Requested at: ${new Date().toLocaleTimeString()}`);
-            console.log('='.repeat(80));
-            
-            // Display the actual QR code in terminal if we have the string
-            if (qrString) {
-                QRCode.toString(qrString, { 
-                    type: 'terminal',
-                    width: 60,           // Make it wider
-                    margin: 2,           // Add margin  
-                    small: false         // Use full block characters for better visibility
-                }, (err, qrTerminal) => {
-                    if (!err) {
-                        console.log(qrTerminal);
-                    }
-                });
-                
-                console.log('📱 QR Code displayed above - scan with WhatsApp!');
-            } else {
-                console.log('📱 QR Code is ready for scanning!');
-                console.log('💡 Check the automatic terminal display or use the base64 data');
-            }
-            
-            console.log('⏱️  QR Code expires in ~20 seconds');
-            console.log('🔄 Call this endpoint again if QR expires');
-            console.log('='.repeat(80) + '\n');
-            
-        } catch (terminalError) {
-            logger.warn('Could not display QR in terminal', { error: terminalError.message });
-        }
+        // QR code is already displayed in terminal by the BaileysSession
+        // No need for additional terminal display here
         
         res.json({
             success: true,
@@ -189,7 +152,8 @@ router.post('/getQRCode', validateAuthToken, validateSenderId, async (req, res) 
                 qrCode: qrCodeData,
                 senderId: senderId,
                 message: 'Scan this QR code with WhatsApp to connect your session',
-                expiresIn: '~20 seconds'
+                expiresIn: '~20 seconds',
+                note: 'QR code has been displayed in the terminal'
             }
         });
         
@@ -497,7 +461,11 @@ router.post('/getContacts', validateAuthToken, validateSenderId, checkSessionExi
 // Create new session
 router.post('/createSession', validateAuthToken, validateSenderId, async (req, res) => {
     try {
-        const { senderId, name, userId, webhookUrl } = req.body;
+        const { senderId, name, userId, user_id, adminId, admin_id, webhookUrl } = req.body;
+        
+        // Use aliases if main parameters are not provided
+        const finalUserId = userId || user_id;
+        const finalAdminId = adminId || admin_id;
         
         // Check if session already exists
         try {
@@ -510,7 +478,9 @@ router.post('/createSession', validateAuthToken, validateSenderId, async (req, r
                     data: {
                         sessionId: senderId,
                         status: existingSession.status,
-                        createdAt: existingSession.created_at
+                        createdAt: existingSession.created_at,
+                        userId: existingSession.user_id,
+                        adminId: existingSession.admin_id
                     }
                 });
             }
@@ -518,15 +488,22 @@ router.post('/createSession', validateAuthToken, validateSenderId, async (req, r
             logger.error('Error checking existing session', { senderId, error: dbError.message });
         }
         
+        // Prepare additional data for session creation
+        const additionalData = {
+            name: name,
+            user_id: finalUserId,
+            admin_id: finalAdminId,
+            webhook_url: webhookUrl
+        };
+        
         // Use senderId as the session ID
-        const sessionId = await sessionManager.createSession(senderId);
+        const sessionId = await sessionManager.createSession(senderId, true, additionalData);
         
-        // Update session with provided data if needed
-        if (name || userId || webhookUrl) {
-            // Note: You might want to add update methods to handle this
-        }
-        
-        logger.api('/createSession', 'Session created', { sessionId: senderId });
+        logger.api('/createSession', 'Session created', { 
+            sessionId: senderId, 
+            userId: finalUserId, 
+            adminId: finalAdminId 
+        });
         
         res.json({
             success: true,
@@ -534,7 +511,12 @@ router.post('/createSession', validateAuthToken, validateSenderId, async (req, r
             data: {
                 sessionId: senderId,
                 senderId: senderId,
-                status: 'created'
+                userId: finalUserId,
+                adminId: finalAdminId,
+                name: name,
+                webhookUrl: webhookUrl,
+                status: 'created',
+                timestamp: new Date().toISOString()
             }
         });
         
@@ -594,6 +576,12 @@ router.get('/sessionStatus/:senderId', async (req, res) => {
         
         const session = await sessionManager.getSessionBySenderId(senderId);
         
+        // Get detailed connection info if session exists in memory
+        let connectionInfo = null;
+        if (session && typeof session.getConnectionInfo === 'function') {
+            connectionInfo = session.getConnectionInfo();
+        }
+        
         res.json({
             success: true,
             message: 'Session status retrieved successfully',
@@ -603,7 +591,12 @@ router.get('/sessionStatus/:senderId', async (req, res) => {
                 hasQRCode: session ? !!session.getQRCode() : false,
                 databaseStatus: sessionData.status,
                 createdAt: sessionData.created_at,
-                updatedAt: sessionData.updated_at
+                updatedAt: sessionData.updated_at,
+                userId: sessionData.user_id,
+                adminId: sessionData.admin_id,
+                webhookUrl: sessionData.webhook_url,
+                webhookStatus: sessionData.webhook_status,
+                connectionInfo: connectionInfo
             }
         });
         
@@ -784,6 +777,341 @@ router.post('/testWebhook', validateAuthToken, async (req, res) => {
     }
 });
 
+// Enhanced webhook diagnostics
+router.post('/webhookDiagnostics', validateAuthToken, async (req, res) => {
+    try {
+        const { senderId, webhookUrl } = req.body;
+        
+        if (!senderId || !webhookUrl) {
+            return res.status(400).json({
+                success: false,
+                message: 'Missing required parameters',
+                error: 'senderId and webhookUrl are required',
+                required: {
+                    senderId: 'string',
+                    webhookUrl: 'string (HTTP/HTTPS URL)'
+                }
+            });
+        }
+
+        logger.api('/webhookDiagnostics', 'Webhook diagnostics requested', { senderId, webhookUrl });
+
+        // Step 1: Validate URL format
+        const urlValidation = sessionManager.webhookManager.validateWebhookUrl(webhookUrl);
+        
+        // Step 2: Test basic connectivity
+        const connectionTest = await sessionManager.webhookManager.testConnection(webhookUrl);
+        
+        // Step 3: Full webhook test
+        const webhookTest = await sessionManager.testWebhook(senderId, webhookUrl);
+        
+        // Step 4: Environment and network info
+        const environmentInfo = {
+            nodeVersion: process.version,
+            platform: process.platform,
+            arch: process.arch,
+            timeout: sessionManager.webhookManager.timeout,
+            retryAttempts: sessionManager.webhookManager.retryAttempts,
+            maxRedirects: sessionManager.webhookManager.maxRedirects,
+            keepAlive: sessionManager.webhookManager.keepAlive,
+            userAgent: 'WhatsApp-API-Baileys/1.0.0',
+            tlsRejectUnauthorized: process.env.NODE_TLS_REJECT_UNAUTHORIZED !== 'false',
+            proxy: process.env.HTTP_PROXY || 'none'
+        };
+
+        // Step 5: DNS resolution test
+        let dnsTest = { success: false, error: 'Not tested' };
+        try {
+            const dns = require('dns').promises;
+            const url = new URL(webhookUrl);
+            const addresses = await dns.resolve(url.hostname);
+            dnsTest = {
+                success: true,
+                hostname: url.hostname,
+                addresses: addresses,
+                resolvedCount: addresses.length
+            };
+        } catch (dnsError) {
+            dnsTest = {
+                success: false,
+                hostname: new URL(webhookUrl).hostname,
+                error: dnsError.message,
+                errorType: 'DNS_RESOLUTION_FAILED'
+            };
+        }
+
+        const diagnostics = {
+            summary: {
+                urlValid: urlValidation.isValid,
+                dnsResolvable: dnsTest.success,
+                connectionWorking: connectionTest.connectionWorking,
+                webhookWorking: webhookTest.success,
+                overallStatus: urlValidation.isValid && dnsTest.success && connectionTest.connectionWorking && webhookTest.success ? 'HEALTHY' : 'ISSUES_DETECTED'
+            },
+            urlValidation,
+            dnsTest,
+            connectionTest,
+            webhookTest,
+            environmentInfo,
+            troubleshooting: {
+                commonIssues: [
+                    'Firewall blocking outbound connections',
+                    'Webhook server not accepting requests',
+                    'SSL/TLS certificate issues',
+                    'Network timeout issues',
+                    'Rate limiting on webhook server',
+                    'Authentication required but not provided'
+                ],
+                suggestions: [
+                    !urlValidation.isValid && 'Fix webhook URL format',
+                    !dnsTest.success && 'Check domain name and DNS configuration',
+                    !connectionTest.connectionWorking && 'Verify webhook server is running and accessible',
+                    !webhookTest.success && 'Check webhook server logs for request handling issues'
+                ].filter(Boolean)
+            }
+        };
+
+        res.json({
+            success: true,
+            message: 'Webhook diagnostics completed',
+            data: {
+                senderId,
+                webhookUrl,
+                timestamp: new Date().toISOString(),
+                diagnostics
+            }
+        });
+        
+    } catch (error) {
+        logger.error('Error in /webhookDiagnostics', { error: error.message, senderId: req.body?.senderId });
+        res.status(500).json({
+            success: false,
+            message: 'Failed to run webhook diagnostics',
+            error: error.message,
+            senderId: req.body?.senderId
+        });
+    }
+});
+
+// Quick webhook connectivity test
+router.post('/testWebhookConnection', validateAuthToken, async (req, res) => {
+    try {
+        const { webhookUrl } = req.body;
+        
+        if (!webhookUrl) {
+            return res.status(400).json({
+                success: false,
+                message: 'Missing required parameter',
+                error: 'webhookUrl is required'
+            });
+        }
+
+        logger.api('/testWebhookConnection', 'Webhook connection test requested', { webhookUrl });
+
+        const connectionTest = await sessionManager.webhookManager.testConnection(webhookUrl);
+        
+        res.json({
+            success: connectionTest.success,
+            message: connectionTest.success ? 'Webhook endpoint is reachable' : 'Webhook endpoint is not reachable',
+            data: {
+                webhookUrl,
+                connectionTest,
+                recommendation: connectionTest.success ? 
+                    'Connection successful. Try full webhook test with /api/testWebhook' :
+                    'Connection failed. Check if webhook server is running and accessible'
+            }
+        });
+        
+    } catch (error) {
+        logger.error('Error in /testWebhookConnection', { error: error.message });
+        res.status(500).json({
+            success: false,
+            message: 'Failed to test webhook connection',
+            error: error.message
+        });
+    }
+});
+
+// Webhook payload comparison for debugging WhatsApp Business vs Regular WhatsApp
+router.post('/compareWebhookPayloads', validateAuthToken, async (req, res) => {
+    try {
+        const { senderId, webhookUrl, testBoth = true } = req.body;
+        
+        if (!senderId || !webhookUrl) {
+            return res.status(400).json({
+                success: false,
+                message: 'Missing required parameters',
+                error: 'senderId and webhookUrl are required'
+            });
+        }
+
+        logger.api('/compareWebhookPayloads', 'Webhook payload comparison requested', { senderId, webhookUrl });
+
+        // Create test payloads for both WhatsApp types
+        const regularWhatsAppPayload = {
+            sessionId: senderId,
+            messageId: 'test_regular_' + Date.now(),
+            remoteJid: '919876543210@s.whatsapp.net',
+            fromMe: false,
+            timestamp: Date.now(),
+            message: {
+                type: 'text',
+                content: 'Test message from Regular WhatsApp'
+            },
+            participant: null,
+            pushName: 'Test User Regular',
+            appType: 'Regular WhatsApp',
+            deviceInfo: {},
+            messageMetadata: {
+                verifiedBizName: null,
+                bizPrivacyStatus: null,
+                messageStubType: null,
+                messageStubParameters: null,
+                quotedMessage: false,
+                mentions: []
+            },
+            testInfo: {
+                payloadType: 'Regular WhatsApp Simulation',
+                testTimestamp: new Date().toISOString()
+            }
+        };
+
+        const businessWhatsAppPayload = {
+            sessionId: senderId,
+            messageId: 'test_business_' + Date.now(),
+            remoteJid: '919876543210@s.whatsapp.net',
+            fromMe: false,
+            timestamp: Date.now(),
+            message: {
+                type: 'text',
+                content: 'Test message from WhatsApp Business'
+            },
+            participant: null,
+            pushName: 'Test Business User',
+            appType: 'WhatsApp Business',
+            deviceInfo: {
+                deviceSentMeta: {
+                    platform: 'android',
+                    version: '2.23.20.0'
+                }
+            },
+            messageMetadata: {
+                verifiedBizName: 'Test Business',
+                bizPrivacyStatus: 'verified',
+                messageStubType: null,
+                messageStubParameters: null,
+                quotedMessage: false,
+                mentions: []
+            },
+            testInfo: {
+                payloadType: 'WhatsApp Business Simulation',
+                testTimestamp: new Date().toISOString()
+            }
+        };
+
+        const results = [];
+
+        // Test Regular WhatsApp payload
+        console.log('\n🔍 TESTING REGULAR WHATSAPP PAYLOAD');
+        console.log('═══════════════════════════════════════════');
+        console.log(JSON.stringify(regularWhatsAppPayload, null, 2));
+
+        try {
+            const regularResult = await sessionManager.webhookManager.sendWebhook(webhookUrl, regularWhatsAppPayload);
+            results.push({
+                type: 'Regular WhatsApp',
+                success: true,
+                result: regularResult,
+                payload: regularWhatsAppPayload
+            });
+            console.log('✅ Regular WhatsApp webhook SUCCESS');
+        } catch (regularError) {
+            results.push({
+                type: 'Regular WhatsApp',
+                success: false,
+                error: regularError,
+                payload: regularWhatsAppPayload
+            });
+            console.log('❌ Regular WhatsApp webhook FAILED:', regularError.message);
+        }
+
+        if (testBoth) {
+            // Test WhatsApp Business payload
+            console.log('\n🏢 TESTING WHATSAPP BUSINESS PAYLOAD');
+            console.log('═══════════════════════════════════════════');
+            console.log(JSON.stringify(businessWhatsAppPayload, null, 2));
+
+            try {
+                const businessResult = await sessionManager.webhookManager.sendWebhook(webhookUrl, businessWhatsAppPayload);
+                results.push({
+                    type: 'WhatsApp Business',
+                    success: true,
+                    result: businessResult,
+                    payload: businessWhatsAppPayload
+                });
+                console.log('✅ WhatsApp Business webhook SUCCESS');
+            } catch (businessError) {
+                results.push({
+                    type: 'WhatsApp Business',
+                    success: false,
+                    error: businessError,
+                    payload: businessWhatsAppPayload
+                });
+                console.log('❌ WhatsApp Business webhook FAILED:', businessError.message);
+            }
+        }
+
+        // Compare results
+        const comparison = {
+            regularWhatsApp: results.find(r => r.type === 'Regular WhatsApp'),
+            whatsappBusiness: results.find(r => r.type === 'WhatsApp Business'),
+            analysis: {
+                bothSuccessful: results.every(r => r.success),
+                bothFailed: results.every(r => !r.success),
+                differentResults: results.length > 1 && results[0].success !== results[1].success,
+                payloadDifferences: {
+                    appType: 'Different appType field',
+                    deviceInfo: 'Business has more device information',
+                    verifiedBizName: 'Business has verified business name',
+                    bizPrivacyStatus: 'Business has privacy status'
+                }
+            }
+        };
+
+        console.log('\n📊 COMPARISON RESULTS:');
+        console.log('═══════════════════════════════════════════');
+        console.log('Regular WhatsApp Success:', comparison.regularWhatsApp?.success);
+        console.log('WhatsApp Business Success:', comparison.whatsappBusiness?.success);
+        console.log('Different Results:', comparison.analysis.differentResults);
+
+        res.json({
+            success: true,
+            message: 'Webhook payload comparison completed',
+            data: {
+                senderId,
+                webhookUrl,
+                timestamp: new Date().toISOString(),
+                comparison,
+                recommendations: [
+                    comparison.analysis.differentResults && 'Check webhook server logs for differences in payload handling',
+                    !comparison.analysis.bothSuccessful && 'Check webhook server configuration and error logs',
+                    'Compare the payload structures and server response handling',
+                    'Verify if webhook server expects specific fields for WhatsApp Business vs Regular WhatsApp'
+                ].filter(Boolean)
+            }
+        });
+        
+    } catch (error) {
+        logger.error('Error in /compareWebhookPayloads', { error: error.message, senderId: req.body?.senderId });
+        res.status(500).json({
+            success: false,
+            message: 'Failed to compare webhook payloads',
+            error: error.message,
+            senderId: req.body?.senderId
+        });
+    }
+});
+
 // Get system stats
 router.get('/stats', (req, res) => {
     try {
@@ -812,7 +1140,8 @@ router.post('/displayQR', validateAuthToken, validateSenderId, async (req, res) 
         
         logger.api('/displayQR', 'Terminal QR display requested', { senderId });
         
-        const qrString = await sessionManager.getQRString(senderId);
+        // Use the new API-specific method
+        const qrString = await sessionManager.getQRStringForAPI(senderId);
         
         if (!qrString) {
             return res.status(404).json({
@@ -826,37 +1155,16 @@ router.post('/displayQR', validateAuthToken, validateSenderId, async (req, res) 
             });
         }
 
-        // Display QR code in terminal
-        const QRCode = require('qrcode');
-        
-        console.log('\n' + '⚡'.repeat(80));
-        console.log('📱 TERMINAL QR DISPLAY - SCAN WITH YOUR PHONE');
-        console.log(`🔗 Sender ID: ${senderId}`);
-        console.log(`📡 API Endpoint: POST /api/displayQR`);
-        console.log(`🕐 Displayed at: ${new Date().toLocaleTimeString()}`);
-        console.log('⚡'.repeat(80));
-        
-        QRCode.toString(qrString, { 
-            type: 'terminal',
-            width: 60,           // Make it wider
-            margin: 2,           // Add margin  
-            small: false         // Use full block characters for better visibility
-        }, (err, qrTerminal) => {
-            if (!err) {
-                console.log(qrTerminal);
-            }
-        });
-        
-        console.log('📱 Scan the QR code above with WhatsApp!');
-        console.log('⏱️  QR Code expires in ~20 seconds');
-        console.log('⚡'.repeat(80) + '\n');
+        // QR code is already displayed in terminal by the BaileysSession
+        // No need for additional terminal display here
         
         res.json({
             success: true,
             message: 'QR code displayed in terminal successfully',
             data: {
                 senderId: senderId,
-                expiresIn: '~20 seconds'
+                expiresIn: '~20 seconds',
+                note: 'QR code has been displayed in the terminal above'
             }
         });
         
@@ -1165,6 +1473,307 @@ router.post('/triggerHealthCheck', validateAuthToken, async (req, res) => {
             success: false,
             message: 'Failed to trigger health check',
             error: error.message
+        });
+    }
+});
+
+// Get sessions by user ID
+router.get('/sessions/user/:userId', async (req, res) => {
+    try {
+        const { userId } = req.params;
+        const { authToken } = req.query;
+        
+        // Validate authToken from query parameter
+        if (!authToken || authToken !== process.env.AUTH_TOKEN) {
+            return res.status(401).json({
+                success: false,
+                message: 'Authentication failed',
+                error: 'Invalid or missing authToken',
+                data: {
+                    userId: userId
+                }
+            });
+        }
+        
+        // Validate userId format (should be a non-empty string)
+        if (!userId || typeof userId !== 'string' || userId.trim() === '') {
+            return res.status(400).json({
+                success: false,
+                message: 'Invalid user ID format',
+                error: 'userId must be a non-empty string',
+                data: {
+                    userId: userId
+                }
+            });
+        }
+        
+        logger.api('/sessions/user/:userId', 'Sessions requested for user', { userId });
+        
+        // Get sessions for the user
+        const sessions = await sessionManager.getSessionsByUserId(userId);
+        
+        // Prepare response data with enhanced information
+        const responseData = sessions.map(session => ({
+            sessionId: session.session_id,
+            senderId: session.session_id,
+            name: session.name,
+            status: session.status,
+            userId: session.user_id,
+            adminId: session.admin_id,
+            webhookUrl: session.webhook_url,
+            webhookStatus: session.webhook_status,
+            autoRead: session.auto_read,
+            createdAt: session.created_at,
+            updatedAt: session.updated_at,
+            // Runtime status from active sessions
+            isConnected: session.isConnected,
+            hasQRCode: session.hasQRCode,
+            inMemory: session.inMemory
+        }));
+        
+        res.json({
+            success: true,
+            message: `Sessions retrieved successfully for user ${userId}`,
+            data: {
+                userId: userId,
+                sessions: responseData,
+                count: responseData.length,
+                statistics: {
+                    total: responseData.length,
+                    connected: responseData.filter(s => s.isConnected).length,
+                    disconnected: responseData.filter(s => !s.isConnected).length,
+                    withQRCode: responseData.filter(s => s.hasQRCode).length,
+                    inMemory: responseData.filter(s => s.inMemory).length
+                },
+                timestamp: new Date().toISOString()
+            }
+        });
+        
+    } catch (error) {
+        logger.error('Error in /sessions/user/:userId', { error: error.message, userId: req.params?.userId });
+        res.status(500).json({
+            success: false,
+            message: 'Failed to retrieve user sessions',
+            error: error.message,
+            userId: req.params?.userId
+        });
+    }
+});
+
+// New endpoint for detailed connection diagnostics
+router.post('/sessionDiagnostics', validateAuthToken, validateSenderId, async (req, res) => {
+    try {
+        const { senderId } = req.body;
+        
+        logger.api('/sessionDiagnostics', 'Session diagnostics requested', { senderId });
+        
+        // Check if session exists in database
+        const sessionData = await sessionManager.database.getSession(senderId);
+        if (!sessionData) {
+            return res.status(404).json({
+                success: false,
+                message: 'Session not found',
+                error: `Session not found for senderId: ${senderId}. Please create session first.`,
+                data: {
+                    senderId: senderId,
+                    suggestion: 'Use POST /api/createSession to create a new session'
+                }
+            });
+        }
+        
+        const session = await sessionManager.getSessionBySenderId(senderId);
+        
+        // Collect diagnostic information
+        const diagnostics = {
+            senderId: senderId,
+            sessionInMemory: !!session,
+            databaseInfo: {
+                exists: !!sessionData,
+                status: sessionData?.status,
+                userId: sessionData?.user_id,
+                adminId: sessionData?.admin_id,
+                createdAt: sessionData?.created_at,
+                updatedAt: sessionData?.updated_at
+            }
+        };
+        
+        if (session) {
+            diagnostics.sessionInfo = {
+                isConnected: session.isSessionConnected(),
+                hasQRCode: !!session.getQRCode(),
+                qrString: !!session.getQRString(),
+                connectionInfo: session.getConnectionInfo ? session.getConnectionInfo() : null
+            };
+            
+            // Check session directory
+            const fs = require('fs');
+            const path = require('path');
+            const sessionPath = path.join(process.env.SESSION_STORAGE_PATH || './sessions', senderId);
+            const authPath = path.join(sessionPath, 'auth');
+            
+            diagnostics.filesystem = {
+                sessionDirExists: fs.existsSync(sessionPath),
+                authDirExists: fs.existsSync(authPath),
+                authFiles: []
+            };
+            
+            try {
+                if (fs.existsSync(authPath)) {
+                    diagnostics.filesystem.authFiles = fs.readdirSync(authPath);
+                }
+            } catch (fsError) {
+                diagnostics.filesystem.error = fsError.message;
+            }
+        }
+        
+        res.json({
+            success: true,
+            message: 'Session diagnostics completed',
+            data: diagnostics
+        });
+        
+    } catch (error) {
+        logger.error('Error in /sessionDiagnostics', { error: error.message, senderId: req.body?.senderId });
+        res.status(500).json({
+            success: false,
+            message: 'Failed to get session diagnostics',
+            error: error.message,
+            senderId: req.body?.senderId
+        });
+    }
+});
+
+// Test app type detection for WhatsApp Business vs Regular WhatsApp
+router.post('/testAppTypeDetection', validateAuthToken, async (req, res) => {
+    try {
+        const { senderId } = req.body;
+        
+        if (!senderId) {
+            return res.status(400).json({
+                success: false,
+                message: 'Missing required parameter',
+                error: 'senderId is required'
+            });
+        }
+
+        logger.api('/testAppTypeDetection', 'App type detection test requested', { senderId });
+
+        // Get the session to test message handling
+        const session = await sessionManager.getSessionBySenderId(senderId);
+        if (!session) {
+            return res.status(404).json({
+                success: false,
+                message: 'Session not found',
+                error: 'Session not found or not active',
+                senderId
+            });
+        }
+
+        console.log('\n🧪 TESTING APP TYPE DETECTION');
+        console.log('════════════════════════════════════════════════════════════════════');
+
+        // Test 1: Regular WhatsApp message simulation
+        const regularMessage = {
+            key: {
+                id: 'test_regular_' + Date.now(),
+                remoteJid: '919876543210@s.whatsapp.net',
+                fromMe: false
+            },
+            messageTimestamp: Math.floor(Date.now() / 1000),
+            pushName: 'Regular User',
+            message: {
+                conversation: 'Test message from regular WhatsApp'
+            }
+            // No verifiedBizName, bizPrivacyStatus, deviceSentMeta fields
+        };
+
+        // Test 2: WhatsApp Business message simulation (verified)
+        const businessVerifiedMessage = {
+            key: {
+                id: 'test_business_verified_' + Date.now(),
+                remoteJid: '919876543211@s.whatsapp.net',
+                fromMe: false
+            },
+            messageTimestamp: Math.floor(Date.now() / 1000),
+            pushName: 'Business User',
+            verifiedBizName: 'Test Business',
+            message: {
+                conversation: 'Test message from verified WhatsApp Business'
+            }
+        };
+
+        // Test 3: WhatsApp Business message simulation (unverified)
+        const businessUnverifiedMessage = {
+            key: {
+                id: 'test_business_unverified_' + Date.now(),
+                remoteJid: '919876543212@s.whatsapp.net',
+                fromMe: false
+            },
+            messageTimestamp: Math.floor(Date.now() / 1000),
+            pushName: 'Business User 2',
+            bizPrivacyStatus: 'unverified',
+            message: {
+                conversation: 'Test message from unverified WhatsApp Business'
+            }
+        };
+
+        const testResults = [];
+
+        // Test Regular WhatsApp detection
+        console.log('\n📱 TESTING: Regular WhatsApp Message');
+        console.log('Expected: Regular WhatsApp');
+        await session.handleIncomingMessage(regularMessage);
+        testResults.push({
+            type: 'Regular WhatsApp',
+            message: regularMessage,
+            tested: true
+        });
+
+        console.log('\n🏢 TESTING: WhatsApp Business (Verified) Message');
+        console.log('Expected: WhatsApp Business (Verified)');
+        await session.handleIncomingMessage(businessVerifiedMessage);
+        testResults.push({
+            type: 'WhatsApp Business (Verified)',
+            message: businessVerifiedMessage,
+            tested: true
+        });
+
+        console.log('\n🏢 TESTING: WhatsApp Business (Unverified) Message');
+        console.log('Expected: WhatsApp Business');
+        await session.handleIncomingMessage(businessUnverifiedMessage);
+        testResults.push({
+            type: 'WhatsApp Business (Unverified)',
+            message: businessUnverifiedMessage,
+            tested: true
+        });
+
+        console.log('\n✅ APP TYPE DETECTION TESTS COMPLETED');
+        console.log('════════════════════════════════════════════════════════════════════');
+
+        res.json({
+            success: true,
+            message: 'App type detection tests completed successfully',
+            data: {
+                senderId,
+                timestamp: new Date().toISOString(),
+                testsRun: testResults.length,
+                testResults,
+                instructions: [
+                    'Check the console logs above to see the detailed app type detection process',
+                    'Each test message should show the correct app type detection',
+                    'Regular WhatsApp messages should not have verifiedBizName or bizPrivacyStatus fields',
+                    'WhatsApp Business messages should have these business-specific fields'
+                ]
+            }
+        });
+        
+    } catch (error) {
+        logger.error('Error in /testAppTypeDetection', { error: error.message, senderId: req.body?.senderId });
+        res.status(500).json({
+            success: false,
+            message: 'Failed to test app type detection',
+            error: error.message,
+            senderId: req.body?.senderId
         });
     }
 });

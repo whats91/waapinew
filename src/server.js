@@ -65,7 +65,7 @@ app.get('/', (req, res) => {
             initialized: sessionManager.isInitialized,
             sessionStats: stats,
             endpoints: {
-                'POST /api/createSession': 'Create a new WhatsApp session with senderId',
+                'POST /api/createSession': 'Create a new WhatsApp session with senderId, user_id, and admin_id',
                 'POST /api/getQRCode': 'Get QR code for session authentication (also displays in terminal)',
                 'POST /api/displayQR': 'Display QR code in terminal only (convenience endpoint)',
                 'POST /api/sendTextSMS': 'Send text message with auto-recovery',
@@ -75,12 +75,18 @@ app.get('/', (req, res) => {
                 'POST /api/validateNumber': 'Validate if number is registered on WhatsApp',
                 'POST /api/updateWebhook': 'Update webhook URL and/or status (unified API)',
                 'POST /api/testWebhook': 'Test webhook endpoint',
+                'POST /api/webhookDiagnostics': 'Comprehensive webhook diagnostics and troubleshooting',
+                'POST /api/testWebhookConnection': 'Quick webhook connectivity test',
+                'POST /api/compareWebhookPayloads': 'Compare webhook payloads between WhatsApp Business and Regular WhatsApp',
+                'POST /api/testAppTypeDetection': 'Test app type detection for Regular WhatsApp vs WhatsApp Business messages',
                 'POST /api/logoutSession': 'Logout from WhatsApp session',
                 'POST /api/deleteSession': 'Permanently delete session and data',
                 'POST /api/refreshSession': 'Manually refresh/reconnect session',
                 'POST /api/checkSessionHealth': 'Check individual session health',
                 'POST /api/triggerHealthCheck': 'Trigger global health check for all sessions',
+                'POST /api/sessionDiagnostics': 'Get detailed session diagnostics for troubleshooting',
                 'GET /api/sessionStatus/:senderId': 'Get session status by senderId',
+                'GET /api/sessions/user/:userId': 'Get all sessions for a specific user with status',
                 'GET /api/stats': 'Get system statistics',
                 'GET /health': 'Health check endpoint'
             },
@@ -88,6 +94,8 @@ app.get('/', (req, res) => {
                 'API Parameters': {
                     'authToken': 'Global API authentication token (set in config.env)',
                     'senderId': 'Sender device phone number (used as session identifier)',
+                    'userId': 'User ID to associate with the session (optional, defaults to senderId)',
+                    'adminId': 'Admin ID who manages the session (optional)',
                     'receiverId': 'WhatsApp number with country code (e.g., 1234567890@s.whatsapp.net)',
                     'messageText': 'Text message content',
                     'mediaurl': 'URL of media file to send (alternative to file upload)',
@@ -105,12 +113,13 @@ app.get('/', (req, res) => {
                     'Expiry': 'QR codes expire in ~20 seconds, new ones generate automatically'
                 },
                 'Example Usage': {
-                    'Create Session': 'POST /api/createSession with { "authToken": "global-token", "senderId": "919876543210" }',
+                    'Create Session': 'POST /api/createSession with { "authToken": "global-token", "senderId": "919876543210", "userId": "user123", "adminId": "admin456" }',
                     'Get QR Code': 'POST /api/getQRCode with { "authToken": "global-token", "senderId": "919876543210" }',
                     'Display QR': 'POST /api/displayQR with { "authToken": "global-token", "senderId": "919876543210" }',
                     'Send Text': 'POST /api/sendTextSMS with { "authToken": "global-token", "senderId": "919876543210", "receiverId": "number@s.whatsapp.net", "messageText": "Hello" }',
                     'Send Media': 'POST /api/sendMediaSMS with form-data: authToken, senderId, receiverId, and either file upload or mediaurl',
-                    'Session Status': 'GET /api/sessionStatus/919876543210?authToken=global-token'
+                    'Session Status': 'GET /api/sessionStatus/919876543210?authToken=global-token',
+                    'User Sessions': 'GET /api/sessions/user/user123?authToken=global-token'
                 }
             }
         });
@@ -203,9 +212,24 @@ process.on('unhandledRejection', (reason, promise) => {
     });
     console.error('Unhandled Rejection at:', promise, 'reason:', reason);
     
+    // Check if it's a WebSocket related error that we can ignore
+    const isWebSocketError = reason?.message?.includes('WebSocket was closed') || 
+                            reason?.message?.includes('socket hang up') ||
+                            reason?.message?.includes('ECONNRESET');
+    
+    if (isWebSocketError) {
+        logger.warn('WebSocket related error caught, continuing operation', { 
+            error: reason?.message 
+        });
+        return; // Don't exit for WebSocket errors
+    }
+    
     // For debugging, let's not exit immediately but log the error
     if (process.env.NODE_ENV === 'production') {
+        logger.error('Exiting due to unhandled rejection in production');
         process.exit(1);
+    } else {
+        logger.warn('Unhandled rejection in development mode, continuing...');
     }
 });
 

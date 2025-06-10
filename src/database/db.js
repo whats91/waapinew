@@ -39,6 +39,7 @@ class Database {
                 webhook_status BOOLEAN DEFAULT 0,
                 webhook_url TEXT,
                 user_id TEXT,
+                admin_id TEXT,
                 created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
                 updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
             );
@@ -71,20 +72,31 @@ class Database {
                     console.log('Env table created successfully');
                 }
             });
+
+            // Add admin_id column to existing sessions table if it doesn't exist
+            this.db.run(`
+                ALTER TABLE sessions ADD COLUMN admin_id TEXT;
+            `, (err) => {
+                if (err && !err.message.includes('duplicate column')) {
+                    console.error('Error adding admin_id column:', err.message);
+                } else if (!err) {
+                    console.log('Admin_id column added successfully');
+                }
+            });
         });
     }
 
     // Session operations
     async createSession(sessionData) {
-        const { session_id, name, auth_token, user_id, webhook_url } = sessionData;
+        const { session_id, name, auth_token, user_id, admin_id, webhook_url } = sessionData;
         
         return new Promise((resolve, reject) => {
             const stmt = this.db.prepare(`
-                INSERT INTO sessions (session_id, name, auth_token, user_id, webhook_url)
-                VALUES (?, ?, ?, ?, ?)
+                INSERT INTO sessions (session_id, name, auth_token, user_id, admin_id, webhook_url)
+                VALUES (?, ?, ?, ?, ?, ?)
             `);
             
-            stmt.run([session_id, name, auth_token, user_id, webhook_url], function(err) {
+            stmt.run([session_id, name, auth_token, user_id, admin_id, webhook_url], function(err) {
                 if (err) {
                     reject(err);
                 } else {
@@ -169,6 +181,22 @@ class Database {
                     resolve(rows);
                 }
             });
+        });
+    }
+
+    async getSessionsByUserId(userId) {
+        return new Promise((resolve, reject) => {
+            this.db.all(
+                'SELECT * FROM sessions WHERE user_id = ?',
+                [userId],
+                (err, rows) => {
+                    if (err) {
+                        reject(err);
+                    } else {
+                        resolve(rows);
+                    }
+                }
+            );
         });
     }
 
