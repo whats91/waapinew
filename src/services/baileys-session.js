@@ -42,6 +42,17 @@ class BaileysSession {
         this.lastQRCodeGenerated = null; // Track last QR code to avoid regeneration during auth
         this.preventQRRegeneration = false; // Flag to prevent QR regeneration during auth
         
+        // CRITICAL: Session state management for preventing conflicts
+        this.isConnecting = false; // Track if currently connecting to prevent multiple connections
+        this.isDestroying = false; // Track if session is being destroyed
+        this.connectionPromise = null; // Store active connection promise to prevent multiple connections
+        this.heartbeatInterval = null; // Store heartbeat interval reference
+        this.socketCreateLock = false; // Prevent multiple socket creation
+        this.streamConflictCount = 0; // Track stream conflicts for escalation
+        this.lastStreamConflictTime = null; // Track last conflict time
+        this.maxStreamConflicts = 3; // Max conflicts before forced reset
+        this.streamConflictCooldown = 30000; // 30 seconds cooldown between conflicts
+        
         this.ensureSessionDirectory();
     }
 
@@ -88,18 +99,88 @@ class BaileysSession {
 
     // Connect to WhatsApp (creates socket and starts connection)
     async connect() {
+        // CRITICAL: Prevent multiple concurrent connections
+        if (this.isConnecting) {
+            logger.session(this.sessionId, 'Connection already in progress, waiting for existing connection');
+            if (this.connectionPromise) {
+                return await this.connectionPromise;
+            }
+            // If no connection promise but isConnecting is true, wait a bit and retry
+            await new Promise(resolve => setTimeout(resolve, 1000));
+            return await this.connect();
+        }
+        
+        // CRITICAL: Check if session is being destroyed
+        if (this.isDestroying) {
+            throw new Error('Session is being destroyed, cannot connect');
+        }
+        
+        // CRITICAL: Check for socket creation lock
+        if (this.socketCreateLock) {
+            logger.session(this.sessionId, 'Socket creation locked, waiting...');
+            let waitCount = 0;
+            while (this.socketCreateLock && waitCount < 50) { // Max 5 seconds wait
+                await new Promise(resolve => setTimeout(resolve, 100));
+                waitCount++;
+            }
+            if (this.socketCreateLock) {
+                throw new Error('Socket creation timeout - another process may be creating socket');
+            }
+        }
+        
+        this.isConnecting = true;
+        this.socketCreateLock = true;
+        
+        // Create and store connection promise to prevent multiple connections
+        this.connectionPromise = this._performConnection();
+        
+        try {
+            const result = await this.connectionPromise;
+            return result;
+        } finally {
+            this.isConnecting = false;
+            this.socketCreateLock = false;
+            this.connectionPromise = null;
+        }
+    }
+    
+    // Internal method to perform the actual connection
+    async _performConnection() {
         try {
             if (!this.isInitialized) {
                 await this.initializeWithoutConnection();
             }
 
+            // ENHANCED: More aggressive socket cleanup before creating new one
             if (this.socket) {
-                logger.session(this.sessionId, 'Socket already exists, destroying before reconnect');
+                logger.session(this.sessionId, 'Destroying existing socket before creating new one', {
+                    socketExists: !!this.socket,
+                    socketReadyState: this.socket.readyState,
+                    hasUser: !!this.socket.user
+                });
+                
                 try {
-                    this.socket.end();
+                    // Clear all event listeners first
+                    if (this.socket.ev) {
+                        this.socket.ev.removeAllListeners();
+                    }
+                    
+                    // Properly close socket
+                    if (this.socket.readyState === 1) { // OPEN
+                        this.socket.close();
+                    } else {
+                        this.socket.end();
+                    }
+                    
+                    // Add delay to ensure cleanup
+                    await new Promise(resolve => setTimeout(resolve, 500));
                 } catch (e) {
-                    // Ignore errors when ending existing socket
+                    logger.warn('Error cleaning up existing socket', { 
+                        sessionId: this.sessionId, 
+                        error: e.message 
+                    });
                 }
+                
                 this.socket = null;
             }
 
@@ -129,13 +210,20 @@ class BaileysSession {
                 browser: ['WhatsApp API', 'Chrome', '1.0.0'],
                 generateHighQualityLinkPreview: true,
                 markOnlineOnConnect: false,
-                // Add connection options for better stability
+                // ENHANCED: Connection options for better stability and conflict prevention
                 connectTimeoutMs: 60000,
                 defaultQueryTimeoutMs: 60000,
-                keepAliveIntervalMs: 10000,
+                keepAliveIntervalMs: 30000, // Increased from 10s to 30s
                 // Reduce memory usage
                 shouldSyncHistoryMessage: () => false,
-                shouldIgnoreJid: jid => isJidBroadcast(jid) || isJidStatusBroadcast(jid) || isJidNewsletter(jid)
+                shouldIgnoreJid: jid => isJidBroadcast(jid) || isJidStatusBroadcast(jid) || isJidNewsletter(jid),
+                // CRITICAL: Add connection conflict prevention
+                printQRInTerminal: false, // Prevent terminal QR conflicts
+                qrTimeout: 20000, // 20 second QR timeout
+                // Add socket options for stability
+                socketConfig: {
+                    timeout: 60000
+                }
             });
 
             this.setupEventHandlers();
@@ -369,41 +457,100 @@ class BaileysSession {
                         }
                         
                         this.retryCount = 0; // Reset retry count for restart scenarios
-                        setTimeout(() => {
-                            // Enhanced reconnection for authentication scenarios
-                            if (this.isAuthenticating || this.preventQRRegeneration) {
-                                logger.session(this.sessionId, 'Resuming authentication after stream error', {
-                                    isAuthenticating: this.isAuthenticating,
-                                    qrAge: qrAge,
-                                    autoDetected: recentQRGenerated
-                                });
-                                
-                                // For authentication scenarios, reconnect more aggressively
-                                this.connect().catch(error => {
-                                    logger.error('Authentication resume connection failed', { 
-                                        sessionId: this.sessionId, 
-                                        error: error.message 
+                        
+                        // CRITICAL: Add delay and prevent multiple reconnection attempts
+                        if (!this.isConnecting) {
+                            setTimeout(() => {
+                                // Enhanced reconnection for authentication scenarios
+                                if (this.isAuthenticating || this.preventQRRegeneration) {
+                                    logger.session(this.sessionId, 'Resuming authentication after stream error', {
+                                        isAuthenticating: this.isAuthenticating,
+                                        qrAge: qrAge,
+                                        autoDetected: recentQRGenerated
                                     });
                                     
-                                    // If connection fails during authentication, try once more
-                                    setTimeout(() => {
-                                        this.connect().catch(finalError => {
-                                            logger.error('Final authentication resume failed', {
-                                                sessionId: this.sessionId,
-                                                error: finalError.message
-                                            });
-                                            // Clear authentication state if all attempts fail
-                                            this.clearAuthenticationState();
+                                    // For authentication scenarios, reconnect more aggressively
+                                    this.connect().catch(error => {
+                                        logger.error('Authentication resume connection failed', { 
+                                            sessionId: this.sessionId, 
+                                            error: error.message 
                                         });
-                                    }, 3000);
-                                });
-                            } else {
-                                // Normal initialization for non-authentication scenarios
-                                this.initialize().catch(error => {
-                                    logger.error('Restart reconnection failed', { sessionId: this.sessionId, error: error.message });
-                                });
+                                        
+                                        // If connection fails during authentication, try once more
+                                        setTimeout(() => {
+                                            this.connect().catch(finalError => {
+                                                logger.error('Final authentication resume failed', {
+                                                    sessionId: this.sessionId,
+                                                    error: finalError.message
+                                                });
+                                                // Clear authentication state if all attempts fail
+                                                this.clearAuthenticationState();
+                                            });
+                                        }, 3000);
+                                    });
+                                } else {
+                                    // Normal initialization for non-authentication scenarios
+                                    this.initialize().catch(error => {
+                                        logger.error('Restart reconnection failed', { sessionId: this.sessionId, error: error.message });
+                                    });
+                                }
+                            }, 2000);
+                        } else {
+                            logger.session(this.sessionId, 'Connection already in progress, skipping restart attempt');
+                        }
+                    } else if (statusCode === 440) {
+                        // CRITICAL: Handle Stream Conflict (440) properly
+                        this.streamConflictCount++;
+                        this.lastStreamConflictTime = Date.now();
+                        
+                        logger.session(this.sessionId, `Stream conflict detected (${this.streamConflictCount}/${this.maxStreamConflicts})`, {
+                            conflictCount: this.streamConflictCount,
+                            lastConflictTime: this.lastStreamConflictTime,
+                            error: lastDisconnect?.error?.message
+                        });
+                        
+                        // If too many conflicts, force a longer cooldown and reset
+                        if (this.streamConflictCount >= this.maxStreamConflicts) {
+                            logger.session(this.sessionId, 'Maximum stream conflicts reached, forcing cooldown and reset');
+                            
+                            // Clear authentication state
+                            this.clearAuthenticationState();
+                            
+                            // Destroy socket completely
+                            if (this.socket) {
+                                try {
+                                    this.socket.ev.removeAllListeners();
+                                    this.socket.end();
+                                } catch (e) {
+                                    // Ignore errors
+                                }
+                                this.socket = null;
                             }
-                        }, 2000);
+                            
+                            // Force cooldown
+                            setTimeout(() => {
+                                logger.session(this.sessionId, 'Stream conflict cooldown completed, resetting conflict count');
+                                this.streamConflictCount = 0;
+                                this.lastStreamConflictTime = null;
+                            }, this.streamConflictCooldown);
+                            
+                            await this.updateSessionStatus('failed').catch(() => {});
+                            return; // Don't attempt reconnection
+                        }
+                        
+                        // For fewer conflicts, wait longer before reconnecting
+                        const conflictDelay = Math.min(5000 * this.streamConflictCount, 30000); // 5s, 10s, 15s max
+                        
+                        if (!this.isConnecting) {
+                            setTimeout(() => {
+                                if (this.streamConflictCount < this.maxStreamConflicts) {
+                                    logger.session(this.sessionId, `Attempting reconnection after stream conflict (delay: ${conflictDelay}ms)`);
+                                    this.initialize().catch(error => {
+                                        logger.error('Stream conflict reconnection failed', { sessionId: this.sessionId, error: error.message });
+                                    });
+                                }
+                            }, conflictDelay);
+                        }
                     } else if (statusCode === DisconnectReason.connectionClosed || 
                               statusCode === DisconnectReason.connectionLost ||
                               statusCode === DisconnectReason.timedOut) {
@@ -698,23 +845,42 @@ class BaileysSession {
         };
         
         // Add a heartbeat to check if the session is still alive
-        const heartbeatInterval = setInterval(() => {
-            console.log(`💓 Session Heartbeat [${this.sessionId}]:`, {
-                connected: this.isConnected,
-                socketExists: !!this.socket,
-                socketReadyState: this.socket?.readyState,
-                hasUser: !!this.socket?.user,
-                timestamp: new Date().toISOString()
-            });
+        // CRITICAL: Clear existing heartbeat to prevent multiple timers
+        if (this.heartbeatInterval) {
+            clearInterval(this.heartbeatInterval);
+            this.heartbeatInterval = null;
+        }
+        
+        this.heartbeatInterval = setInterval(() => {
+            // Only log heartbeat if session is not being destroyed
+            if (!this.isDestroying) {
+                console.log(`💓 Session Heartbeat [${this.sessionId}]:`, {
+                    connected: this.isConnected,
+                    socketExists: !!this.socket,
+                    socketReadyState: this.socket?.readyState,
+                    hasUser: !!this.socket?.user,
+                    timestamp: new Date().toISOString()
+                });
+            }
         }, 30000); // Every 30 seconds
         
-        // Clean up heartbeat when socket is destroyed
-        const originalDestroy = this.destroy.bind(this);
-        this.destroy = async () => {
-            console.log(`🧹 Cleaning up heartbeat for session: ${this.sessionId}`);
-            clearInterval(heartbeatInterval);
-            return await originalDestroy();
-        };
+        // CRITICAL: Fix destroy method to prevent multiple definitions
+        // Only override destroy method once
+        if (!this._destroyMethodOverridden) {
+            const originalDestroy = this.destroy.bind(this);
+            this.destroy = async () => {
+                console.log(`🧹 Cleaning up heartbeat for session: ${this.sessionId}`);
+                this.isDestroying = true; // Set destroying flag
+                
+                if (this.heartbeatInterval) {
+                    clearInterval(this.heartbeatInterval);
+                    this.heartbeatInterval = null;
+                }
+                
+                return await originalDestroy();
+            };
+            this._destroyMethodOverridden = true;
+        }
 
         // Group updates
         this.socket.ev.on('groups.update', (updates) => {
@@ -1313,22 +1479,50 @@ class BaileysSession {
 
     async destroy() {
         try {
+            // CRITICAL: Set destroying flag immediately
+            this.isDestroying = true;
+            
+            // Clear authentication state
+            this.clearAuthenticationState();
+            
+            // Clear heartbeat interval
+            if (this.heartbeatInterval) {
+                clearInterval(this.heartbeatInterval);
+                this.heartbeatInterval = null;
+            }
+            
+            // ENHANCED: More thorough socket cleanup
             if (this.socket) {
                 try {
                     // Check socket state before attempting to close
+                    logger.session(this.sessionId, 'Destroying socket', {
+                        readyState: this.socket.readyState,
+                        hasUser: !!this.socket.user
+                    });
+                    
+                    // Remove all event listeners first to prevent race conditions
+                    if (this.socket.ev) {
+                        this.socket.ev.removeAllListeners();
+                    }
+                    
+                    // Close socket based on state
                     if (this.socket.readyState !== undefined) {
                         // WebSocket readyState: 0=CONNECTING, 1=OPEN, 2=CLOSING, 3=CLOSED
                         if (this.socket.readyState === 0 || this.socket.readyState === 1) {
-                            this.socket.end();
+                            this.socket.close();
                         } else {
-                            logger.session(this.sessionId, 'Socket already closed or closing, skipping end() call');
+                            logger.session(this.sessionId, 'Socket already closed or closing, skipping close() call');
                         }
                     } else {
-                        // Fallback for other socket types or if readyState is not available
+                        // Fallback for other socket types
                         this.socket.end();
                     }
+                    
+                    // Wait a bit for cleanup to complete
+                    await new Promise(resolve => setTimeout(resolve, 500));
+                    
                 } catch (socketError) {
-                    // Log the error but don't throw it - destruction should continue
+                    // Log the error but don't throw it - destruction should be resilient
                     logger.warn('Error ending socket during destroy', { 
                         sessionId: this.sessionId, 
                         error: socketError.message,
@@ -1340,12 +1534,28 @@ class BaileysSession {
                 this.socket = null;
             }
             
+            // Reset connection flags
             this.isConnected = false;
+            this.isConnecting = false;
+            this.socketCreateLock = false;
+            this.connectionPromise = null;
+            
+            // Reset stream conflict tracking
+            this.streamConflictCount = 0;
+            this.lastStreamConflictTime = null;
+            
+            // Clear QR data
+            this.qrCodeData = null;
+            this.qrCodeString = null;
+            this.qrCodeTimestamp = null;
+            
             await this.updateSessionStatus('disconnected');
-            logger.session(this.sessionId, 'Session destroyed');
+            logger.session(this.sessionId, 'Session destroyed successfully');
         } catch (error) {
             logger.error('Error destroying session', { sessionId: this.sessionId, error: error.message });
             // Don't throw the error - destruction should be resilient
+        } finally {
+            this.isDestroying = false; // Reset flag
         }
     }
 

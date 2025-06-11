@@ -19,6 +19,12 @@ class SessionManager {
         this.sessionMaxRetries = parseInt(process.env.SESSION_MAX_RETRIES) || 5; // Default 5 retries
         this.healthCheckTimer = null;
         
+        // CRITICAL: Session usage and rate limiting
+        this.sessionUsageTracker = new Map(); // Track session usage patterns
+        this.sessionRecoveryLocks = new Map(); // Prevent multiple recovery attempts
+        this.maxSessionUsagePerMinute = parseInt(process.env.MAX_SESSION_USAGE_PER_MINUTE) || 20; // Max 20 messages per minute per session
+        this.sessionCooldownPeriod = parseInt(process.env.SESSION_COOLDOWN_PERIOD) || 60000; // 1 minute cooldown
+        
         // Initialize existing sessions asynchronously but safely
         this.initializeExistingSessions().catch(error => {
             logger.error('Failed to initialize existing sessions during startup', { error: error.message });
@@ -168,8 +174,37 @@ class SessionManager {
 
     async autoReconnectSession(sessionId) {
         try {
+            // CRITICAL: Prevent multiple concurrent recovery attempts
+            if (this.sessionRecoveryLocks.has(sessionId)) {
+                logger.info('Session recovery already in progress, waiting', { sessionId });
+                const existingPromise = this.sessionRecoveryLocks.get(sessionId);
+                return await existingPromise;
+            }
+            
             logger.info('Auto-reconnecting session', { sessionId });
             
+            // Create recovery promise and store it
+            const recoveryPromise = this._performSessionRecovery(sessionId);
+            this.sessionRecoveryLocks.set(sessionId, recoveryPromise);
+            
+            try {
+                const result = await recoveryPromise;
+                return result;
+            } finally {
+                // Always cleanup the lock
+                this.sessionRecoveryLocks.delete(sessionId);
+            }
+            
+        } catch (error) {
+            logger.error('Auto-reconnection failed', { sessionId, error: error.message });
+            this.sessionRecoveryLocks.delete(sessionId); // Cleanup on error
+            throw error;
+        }
+    }
+    
+    // Internal method to perform session recovery
+    async _performSessionRecovery(sessionId) {
+        try {
             // Get session from memory
             const session = this.sessions.get(sessionId);
             if (!session) {
@@ -181,6 +216,24 @@ class SessionManager {
             if (session.isGeneratingQR) {
                 logger.info('Skipping auto-reconnect during QR generation', { sessionId });
                 return;
+            }
+            
+            // CRITICAL: Check if session is already connecting
+            if (session.isConnecting) {
+                logger.info('Session already connecting, waiting for completion', { sessionId });
+                // Wait for the existing connection attempt
+                let attempts = 0;
+                while (session.isConnecting && attempts < 60) { // Max 30 seconds wait
+                    await new Promise(resolve => setTimeout(resolve, 500));
+                    attempts++;
+                }
+                
+                if (session.isSessionConnected()) {
+                    logger.info('Session connected during wait', { sessionId });
+                    return session;
+                } else {
+                    logger.warn('Session connection wait timed out', { sessionId });
+                }
             }
             
             // Check if this session should be auto-reconnected based on its authentication data
@@ -196,6 +249,25 @@ class SessionManager {
             
             logger.info('Session eligible for auto-reconnect (has authentication data)', { sessionId });
             
+            // ENHANCED: Check for stream conflicts before attempting recovery
+            if (session.streamConflictCount >= session.maxStreamConflicts) {
+                const timeSinceLastConflict = session.lastStreamConflictTime ? 
+                    Date.now() - session.lastStreamConflictTime : Number.MAX_SAFE_INTEGER;
+                
+                if (timeSinceLastConflict < session.streamConflictCooldown) {
+                    logger.info('Session in stream conflict cooldown, skipping recovery', { 
+                        sessionId,
+                        remainingCooldown: session.streamConflictCooldown - timeSinceLastConflict
+                    });
+                    throw new Error(`Session in stream conflict cooldown for ${Math.ceil((session.streamConflictCooldown - timeSinceLastConflict) / 1000)} seconds`);
+                } else {
+                    // Reset conflict count after cooldown
+                    session.streamConflictCount = 0;
+                    session.lastStreamConflictTime = null;
+                    logger.info('Stream conflict cooldown completed, proceeding with recovery', { sessionId });
+                }
+            }
+            
             // Destroy the old session with additional safety
             try {
                 await session.destroy();
@@ -210,7 +282,7 @@ class SessionManager {
             // Remove from memory
             this.sessions.delete(sessionId);
             
-            // Add a small delay to ensure cleanup is complete
+            // Add a delay to ensure cleanup is complete
             await new Promise(resolve => setTimeout(resolve, 1000));
             
             // Create new session with auto-connect enabled (since this has auth data)
@@ -229,9 +301,10 @@ class SessionManager {
             await Promise.race([initPromise, timeoutPromise]);
             
             logger.info('Session auto-reconnected successfully', { sessionId });
+            return newSession;
             
         } catch (error) {
-            logger.error('Auto-reconnection failed', { sessionId, error: error.message });
+            logger.error('Session recovery failed', { sessionId, error: error.message });
             
             // Update database status
             try {
@@ -246,8 +319,7 @@ class SessionManager {
             // Remove from memory if initialization failed
             this.sessions.delete(sessionId);
             
-            // Don't throw the error to prevent health check from crashing
-            // The caller should handle this gracefully
+            throw error;
         }
     }
 
@@ -637,29 +709,115 @@ class SessionManager {
     }
 
     async sendMediaMessage(senderId, receiverId, mediaBuffer, mediaType, caption = '', fileName = null) {
-        const session = await this.getSessionBySenderId(senderId);
-        
-        if (!session) {
-            throw new Error(`Session not found for senderId: ${senderId}`);
-        }
-
         try {
-            return await session.sendMediaMessage(receiverId, mediaBuffer, mediaType, caption, fileName);
+            // CRITICAL: Check if session recovery is already in progress
+            const session = this.sessions.get(senderId);
+            
+            if (!session) {
+                logger.info('Session not found, creating new session', { senderId });
+                await this.createOrRecoverSession(senderId);
+                const newSession = this.sessions.get(senderId);
+                
+                if (!newSession) {
+                    throw new Error(`Failed to create session for senderId: ${senderId}`);
+                }
+                
+                // Wait for connection if not connected
+                if (!newSession.isSessionConnected()) {
+                    logger.info('Waiting for new session to connect', { senderId });
+                    await this.waitForConnection(newSession, 30000);
+                }
+                
+                return await newSession.sendMediaMessage(receiverId, mediaBuffer, mediaType, caption, fileName);
+            }
+            
+            // Session exists - check if it's connecting
+            if (session.isConnecting) {
+                logger.info('Session is connecting, waiting for connection', { senderId });
+                await this.waitForConnection(session, 30000);
+                return await session.sendMediaMessage(receiverId, mediaBuffer, mediaType, caption, fileName);
+            }
+            
+            // Check if session is connected
+            if (session.isSessionConnected()) {
+                logger.info('Session connected, sending media message', { senderId });
+                return await session.sendMediaMessage(receiverId, mediaBuffer, mediaType, caption, fileName);
+            }
+            
+            // Session exists but not connected - attempt recovery
+            logger.info('Session disconnected, attempting recovery', { senderId });
+            
+            // CRITICAL: Check for stream conflicts before recovery
+            if (session.streamConflictCount >= session.maxStreamConflicts) {
+                const timeSinceLastConflict = session.lastStreamConflictTime ? 
+                    Date.now() - session.lastStreamConflictTime : Number.MAX_SAFE_INTEGER;
+                
+                if (timeSinceLastConflict < session.streamConflictCooldown) {
+                    const remainingCooldown = session.streamConflictCooldown - timeSinceLastConflict;
+                    throw new Error(`Session has stream conflicts, please wait ${Math.ceil(remainingCooldown / 1000)} seconds before retry`);
+                } else {
+                    // Reset conflict count after cooldown
+                    session.streamConflictCount = 0;
+                    session.lastStreamConflictTime = null;
+                    logger.info('Stream conflict cooldown completed, resetting count', { senderId });
+                }
+            }
+            
+            // Attempt auto-reconnection
+            await this.autoReconnectSession(senderId);
+            const recoveredSession = this.sessions.get(senderId);
+            
+            if (!recoveredSession) {
+                throw new Error(`Unable to recover session for senderId: ${senderId}`);
+            }
+            
+            // Wait for connection after recovery
+            if (!recoveredSession.isSessionConnected()) {
+                await this.waitForConnection(recoveredSession, 30000);
+            }
+            
+            return await recoveredSession.sendMediaMessage(receiverId, mediaBuffer, mediaType, caption, fileName);
+            
         } catch (error) {
-            logger.error('Error in sendMediaMessage with auto-recovery', {
+            logger.error('Error in sendMediaMessage with enhanced recovery', {
                 senderId,
                 receiverId, 
                 error: error.message,
                 fileName: fileName
             });
 
-            // Auto-recovery: try to reconnect and send again
-            const freshSession = await this.autoReconnectSession(senderId);
-            if (!freshSession) {
-                throw new Error(`Unable to recover session for senderId: ${senderId}`);
+            // LAST RESORT: Try one more time with fresh session if not a conflict error
+            if (!error.message.includes('stream conflicts') && !error.message.includes('Socket creation timeout')) {
+                try {
+                    logger.info('Attempting final recovery with fresh session', { senderId });
+                    
+                    // Destroy existing session completely
+                    const existingSession = this.sessions.get(senderId);
+                    if (existingSession) {
+                        await existingSession.destroy();
+                        this.sessions.delete(senderId);
+                    }
+                    
+                    // Create completely fresh session
+                    await this.createSession(senderId, false);
+                    const freshSession = this.sessions.get(senderId);
+                    
+                    if (freshSession && freshSession.isSessionConnected()) {
+                        return await freshSession.sendMediaMessage(receiverId, mediaBuffer, mediaType, caption, fileName);
+                    } else if (freshSession) {
+                        await this.waitForConnection(freshSession, 30000);
+                        return await freshSession.sendMediaMessage(receiverId, mediaBuffer, mediaType, caption, fileName);
+                    }
+                } catch (retryError) {
+                    logger.error('Final recovery attempt also failed', { 
+                        senderId, 
+                        originalError: error.message,
+                        retryError: retryError.message 
+                    });
+                }
             }
-
-            return await freshSession.sendMediaMessage(receiverId, mediaBuffer, mediaType, caption, fileName);
+            
+            throw error;
         }
     }
 
