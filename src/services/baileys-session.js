@@ -35,6 +35,13 @@ class BaileysSession {
         this.autoConnect = false; // Flag to control automatic connection - default false
         this.isInitialized = false; // Track if session has been initialized
         
+        // NEW: Authentication state preservation during stream errors
+        this.isAuthenticating = false; // Track if user is in authentication process
+        this.qrCodeScanned = false; // Track if QR code has been scanned
+        this.authenticationStartTime = null; // Track when authentication started
+        this.lastQRCodeGenerated = null; // Track last QR code to avoid regeneration during auth
+        this.preventQRRegeneration = false; // Flag to prevent QR regeneration during auth
+        
         this.ensureSessionDirectory();
     }
 
@@ -168,14 +175,87 @@ class BaileysSession {
                 
                 if (qr) {
                     try {
+                        // Check if we should prevent QR regeneration during authentication
+                        if (this.preventQRRegeneration && this.qrCodeData) {
+                            logger.session(this.sessionId, 'QR regeneration prevented - authentication in progress', {
+                                isAuthenticating: this.isAuthenticating,
+                                qrCodeScanned: this.qrCodeScanned,
+                                authStartTime: this.authenticationStartTime
+                            });
+                            return; // Don't generate new QR during authentication
+                        }
+                        
                         this.qrCodeString = qr; // Store original QR string for terminal display
                         this.qrCodeData = await QRCode.toDataURL(qr);
                         this.qrCodeTimestamp = Date.now(); // Track when QR was generated for expiry
+                        this.lastQRCodeGenerated = qr; // Store for comparison
+                        
+                        // NEW: Start authentication tracking immediately when QR is generated
+                        this.isAuthenticating = false; // Reset but will be set if scanned
+                        this.qrCodeScanned = false; // Reset but will be set if scanned  
+                        this.authenticationStartTime = Date.now(); // Track QR generation time
+                        this.preventQRRegeneration = false; // Reset
+                        
                         logger.session(this.sessionId, 'QR code generated', {
                             socketState: this.socket?.readyState,
                             displayMode: this.displayQRInTerminal,
-                            isAPIRequest: this.isAPIRequest
+                            isAPIRequest: this.isAPIRequest,
+                            qrTimestamp: this.qrCodeTimestamp
                         });
+                        
+                        // NEW: Set up early authentication detection
+                        // If stream error occurs within 30 seconds of QR generation, likely user scanned
+                        setTimeout(() => {
+                            // If we're still not connected and QR was generated recently, assume it might be scanned
+                            if (!this.isConnected && this.qrCodeData && 
+                                (Date.now() - this.qrCodeTimestamp < 30000)) {
+                                logger.session(this.sessionId, 'QR may have been scanned - enabling early auth detection', {
+                                    qrAge: Date.now() - this.qrCodeTimestamp,
+                                    socketState: this.socket?.readyState
+                                });
+                                // Enable protection in case of stream error
+                                this.isAuthenticating = true;
+                                this.preventQRRegeneration = true;
+                            }
+                        }, 5000); // Check after 5 seconds
+                        
+                        // NEW: Authentication timeout mechanism to prevent stuck authentication
+                        setTimeout(() => {
+                            // Check if authentication is stuck after 60 seconds
+                            if (this.isAuthenticating && !this.isConnected && this.qrCodeTimestamp) {
+                                const authDuration = Date.now() - this.qrCodeTimestamp;
+                                
+                                if (authDuration > 60000) { // 60 seconds timeout
+                                    logger.session(this.sessionId, 'Authentication timeout - forcing reset', {
+                                        authDuration: authDuration,
+                                        qrAge: authDuration,
+                                        socketExists: !!this.socket,
+                                        socketState: this.socket?.readyState,
+                                        reason: 'Authentication stuck for > 60s'
+                                    });
+                                    
+                                    // Force reset authentication state
+                                    this.clearAuthenticationState();
+                                    
+                                    // Try to restart the socket completely
+                                    if (this.socket) {
+                                        try {
+                                            this.socket.end();
+                                        } catch (e) {
+                                            // Ignore errors
+                                        }
+                                        this.socket = null;
+                                    }
+                                    
+                                    // Clear QR data to force fresh start on next request
+                                    this.qrCodeData = null;
+                                    this.qrCodeString = null;
+                                    this.qrCodeTimestamp = null;
+                                    
+                                    logger.session(this.sessionId, 'Authentication reset completed - ready for fresh QR');
+                                }
+                            }
+                        }, 65000); // Check after 65 seconds
                         
                         // Only display QR in terminal if explicitly requested
                         if (this.displayQRInTerminal) {
@@ -232,7 +312,9 @@ class BaileysSession {
                         reason: statusCode,
                         shouldReconnect,
                         error: lastDisconnect?.error?.message,
-                        socketState: this.socket?.readyState
+                        socketState: this.socket?.readyState,
+                        isAuthenticating: this.isAuthenticating,
+                        qrCodeScanned: this.qrCodeScanned
                     });
 
                     this.isConnected = false;
@@ -240,22 +322,100 @@ class BaileysSession {
                         logger.error('Error updating session status to disconnected', { sessionId: this.sessionId, error: err.message });
                     });
 
-                    // Enhanced disconnect handling with better reconnection logic
+                    // Enhanced disconnect handling with authentication state preservation
                     if (statusCode === DisconnectReason.loggedOut) {
                         logger.session(this.sessionId, 'Session logged out, will not reconnect');
                         await this.updateSessionStatus('logged_out').catch(() => {});
+                        // Clear authentication state on logout
+                        this.clearAuthenticationState();
                     } else if (statusCode === DisconnectReason.restartRequired) {
                         logger.session(this.sessionId, 'WhatsApp restart required, attempting reconnection');
+                        
+                        // ENHANCED: Auto-detect authentication based on timing
+                        const qrAge = this.qrCodeTimestamp ? Date.now() - this.qrCodeTimestamp : null;
+                        const recentQRGenerated = qrAge && qrAge < 30000; // QR generated within last 30 seconds
+                        
+                        // CRITICAL: Preserve authentication state during restart
+                        if (this.isAuthenticating || this.qrCodeScanned || recentQRGenerated) {
+                            if (recentQRGenerated && !this.isAuthenticating) {
+                                logger.session(this.sessionId, 'STREAM ERROR detected shortly after QR generation - AUTO-DETECTING authentication', {
+                                    qrAge: qrAge,
+                                    timeFromQR: `${Math.round(qrAge / 1000)}s`,
+                                    autoDetected: true
+                                });
+                                // Auto-set authentication flags based on timing
+                                this.isAuthenticating = true;
+                                this.qrCodeScanned = true;
+                            }
+                            
+                            logger.session(this.sessionId, 'PRESERVING authentication state during restart', {
+                                isAuthenticating: this.isAuthenticating,
+                                qrCodeScanned: this.qrCodeScanned,
+                                hasQRData: !!this.qrCodeData,
+                                qrAge: qrAge,
+                                autoDetected: recentQRGenerated,
+                                authDuration: this.authenticationStartTime ? Date.now() - this.authenticationStartTime : null
+                            });
+                            
+                            // Set flag to prevent QR regeneration
+                            this.preventQRRegeneration = true;
+                            
+                        } else {
+                            logger.session(this.sessionId, 'No authentication in progress detected', {
+                                qrAge: qrAge,
+                                hasQRData: !!this.qrCodeData,
+                                recentQR: recentQRGenerated
+                            });
+                        }
+                        
                         this.retryCount = 0; // Reset retry count for restart scenarios
                         setTimeout(() => {
-                            this.initialize().catch(error => {
-                                logger.error('Restart reconnection failed', { sessionId: this.sessionId, error: error.message });
-                            });
+                            // Enhanced reconnection for authentication scenarios
+                            if (this.isAuthenticating || this.preventQRRegeneration) {
+                                logger.session(this.sessionId, 'Resuming authentication after stream error', {
+                                    isAuthenticating: this.isAuthenticating,
+                                    qrAge: qrAge,
+                                    autoDetected: recentQRGenerated
+                                });
+                                
+                                // For authentication scenarios, reconnect more aggressively
+                                this.connect().catch(error => {
+                                    logger.error('Authentication resume connection failed', { 
+                                        sessionId: this.sessionId, 
+                                        error: error.message 
+                                    });
+                                    
+                                    // If connection fails during authentication, try once more
+                                    setTimeout(() => {
+                                        this.connect().catch(finalError => {
+                                            logger.error('Final authentication resume failed', {
+                                                sessionId: this.sessionId,
+                                                error: finalError.message
+                                            });
+                                            // Clear authentication state if all attempts fail
+                                            this.clearAuthenticationState();
+                                        });
+                                    }, 3000);
+                                });
+                            } else {
+                                // Normal initialization for non-authentication scenarios
+                                this.initialize().catch(error => {
+                                    logger.error('Restart reconnection failed', { sessionId: this.sessionId, error: error.message });
+                                });
+                            }
                         }, 2000);
                     } else if (statusCode === DisconnectReason.connectionClosed || 
                               statusCode === DisconnectReason.connectionLost ||
                               statusCode === DisconnectReason.timedOut) {
-                        // Common network issues - retry immediately with exponential backoff
+                        // Common network issues - preserve authentication state if active
+                        if (this.isAuthenticating || this.qrCodeScanned) {
+                            logger.session(this.sessionId, 'Network error during authentication - preserving state', {
+                                isAuthenticating: this.isAuthenticating,
+                                qrCodeScanned: this.qrCodeScanned
+                            });
+                            this.preventQRRegeneration = true;
+                        }
+                        
                         if (this.retryCount < this.maxRetries) {
                             this.retryCount++;
                             const backoffTime = Math.min(1000 * Math.pow(2, this.retryCount - 1), 30000); // Max 30 seconds
@@ -269,8 +429,15 @@ class BaileysSession {
                         } else {
                             logger.session(this.sessionId, 'Max network retry attempts reached');
                             await this.updateSessionStatus('failed').catch(() => {});
+                            this.clearAuthenticationState();
                         }
                     } else if (shouldReconnect && this.retryCount < this.maxRetries) {
+                        // Preserve authentication state during general reconnections
+                        if (this.isAuthenticating || this.qrCodeScanned) {
+                            logger.session(this.sessionId, 'General error during authentication - preserving state');
+                            this.preventQRRegeneration = true;
+                        }
+                        
                         this.retryCount++;
                         logger.session(this.sessionId, `Attempting reconnection (${this.retryCount}/${this.maxRetries})`);
                         setTimeout(() => {
@@ -281,10 +448,14 @@ class BaileysSession {
                     } else if (this.retryCount >= this.maxRetries) {
                         logger.session(this.sessionId, 'Max retry attempts reached, stopping reconnection');
                         await this.updateSessionStatus('failed').catch(() => {});
+                        this.clearAuthenticationState();
                     }
                 } else if (connection === 'open') {
                     this.isConnected = true;
                     this.retryCount = 0;
+                    
+                    // SUCCESS: Clear all authentication state
+                    this.clearAuthenticationState();
                     this.qrCodeData = null;
                     this.qrCodeString = null; // Clear QR string when connected
                     this.qrCodeTimestamp = null; // Clear QR timestamp when connected
@@ -303,6 +474,20 @@ class BaileysSession {
                 } else if (connection === 'connecting') {
                     console.log(`\n🔄 Connecting to WhatsApp... (Session: ${this.sessionId.substring(0, 8)}...)\n`);
                     logger.session(this.sessionId, 'Connecting to WhatsApp...');
+                    
+                    // CRITICAL: Detect if this is authentication in progress
+                    if (this.qrCodeData && !this.isConnected) {
+                        logger.session(this.sessionId, 'AUTHENTICATION IN PROGRESS detected - marking state', {
+                            hasQRData: !!this.qrCodeData,
+                            qrAge: this.qrCodeTimestamp ? Date.now() - this.qrCodeTimestamp : null
+                        });
+                        
+                        this.isAuthenticating = true;
+                        this.qrCodeScanned = true;
+                        this.authenticationStartTime = Date.now();
+                        this.preventQRRegeneration = true;
+                    }
+                    
                     await this.updateSessionStatus('connecting').catch(err => {
                         logger.error('Error updating session status to connecting', { sessionId: this.sessionId, error: err.message });
                     });
@@ -963,7 +1148,7 @@ class BaileysSession {
         }
     }
 
-    async sendMediaMessage(receiverId, mediaBuffer, mediaType, caption = '') {
+    async sendMediaMessage(receiverId, mediaBuffer, mediaType, caption = '', fileName = null) {
         if (!this.isConnected) {
             throw new Error('Session not connected');
         }
@@ -988,7 +1173,8 @@ class BaileysSession {
             } else {
                 messageOptions.document = mediaBuffer;
                 messageOptions.mimetype = mediaType;
-                messageOptions.fileName = `document.${mediaType.split('/')[1]}`;
+                // Use provided filename or fallback to generic filename
+                messageOptions.fileName = fileName || `document.${mediaType.split('/')[1]}`;
             }
 
             // Use the validated JID for sending
@@ -997,6 +1183,7 @@ class BaileysSession {
             logger.session(this.sessionId, 'Media message sent', { 
                 receiverId: validation.jid, 
                 mediaType,
+                fileName: messageOptions.fileName,
                 isGroup: validation.isGroup,
                 validationPassed: validation.isRegistered
             });
@@ -1160,6 +1347,13 @@ class BaileysSession {
             logger.error('Error destroying session', { sessionId: this.sessionId, error: error.message });
             // Don't throw the error - destruction should be resilient
         }
+    }
+
+    clearAuthenticationState() {
+        this.isAuthenticating = false;
+        this.qrCodeScanned = false;
+        this.authenticationStartTime = null;
+        this.preventQRRegeneration = false;
     }
 }
 

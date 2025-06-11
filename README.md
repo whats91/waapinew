@@ -144,6 +144,229 @@ Get QR code for WhatsApp authentication with large terminal display.
 
 ---
 
+### 2a. Enhanced QR Code Management System
+
+The API now includes an intelligent QR code caching system that prevents authentication interference and provides better user experience.
+
+#### Enhanced QR Code Response
+
+The `/api/getQRCode` endpoint now returns enhanced responses with state information:
+
+**Enhanced Response Format:**
+```json
+{
+  "success": true,
+  "message": "QR code ready for scanning",
+  "data": {
+    "qrCode": "data:image/png;base64,iVBORw0KGgoAAAANSU...",
+    "senderId": "919876543210",
+    "state": "QR_READY",
+    "shouldStopPolling": false,
+    "expiresIn": 18500,
+    "generatedAt": 1640995200000,
+    "message": "Fresh QR code generated. Please scan with WhatsApp.",
+    "note": "QR code has been displayed in the terminal"
+  }
+}
+```
+
+#### Authentication States
+
+| State | Description | Frontend Action |
+|-------|-------------|-----------------|
+| `QR_READY` | QR code is available for scanning | Continue normal polling |
+| `AUTHENTICATION_IN_PROGRESS` | User scanned QR, auth happening | **STOP polling immediately** |
+| `ALREADY_CONNECTED` | Session is already active | **STOP polling permanently** |
+| `QR_EXPIRED` | QR code expired, new one generated | Continue polling |
+| `ERROR` | Error occurred | Retry after delay |
+
+#### Frontend Implementation Guidelines
+
+**❌ Wrong Way (Current Problem):**
+```javascript
+// This causes authentication failures!
+setInterval(() => {
+    fetchQRCode(); // Keeps requesting every 15 seconds regardless of state
+}, 15000);
+```
+
+**✅ Correct Way (Recommended):**
+```javascript
+let pollingInterval;
+let shouldPoll = true;
+
+async function fetchQRCode() {
+    try {
+        const response = await fetch('/api/getQRCode', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                authToken: 'your-token',
+                senderId: '919876543210'
+            })
+        });
+        
+        const data = await response.json();
+        
+        if (data.success) {
+            // Display QR code to user
+            displayQRCode(data.data.qrCode);
+            
+            // Check if we should stop polling
+            if (data.data.shouldStopPolling) {
+                console.log('Stopping QR polling:', data.data.state);
+                clearInterval(pollingInterval);
+                shouldPoll = false;
+                
+                // Show appropriate message to user
+                if (data.data.state === 'AUTHENTICATION_IN_PROGRESS') {
+                    showMessage('QR Code scanned! Please wait for authentication...');
+                    // Wait for connection confirmation
+                    checkAuthenticationStatus();
+                }
+            }
+        } else if (response.status === 409) {
+            // Session already connected
+            showMessage('Session already connected!');
+            clearInterval(pollingInterval);
+            shouldPoll = false;
+        } else if (response.status === 202) {
+            // Authentication in progress
+            showMessage('Authentication in progress. Please wait...');
+            clearInterval(pollingInterval);
+            shouldPoll = false;
+            checkAuthenticationStatus();
+        }
+    } catch (error) {
+        console.error('QR fetch error:', error);
+    }
+}
+
+// Enhanced polling with state awareness
+function startQRPolling() {
+    if (!shouldPoll) return;
+    
+    fetchQRCode();
+    pollingInterval = setInterval(() => {
+        if (shouldPoll) {
+            fetchQRCode();
+        } else {
+            clearInterval(pollingInterval);
+        }
+    }, 15000);
+}
+```
+
+---
+
+### 2b. Get Authentication Status
+Check authentication status to help frontend manage QR polling intelligently.
+
+**Endpoint:** `POST /api/getAuthStatus`
+
+**Request Body:**
+```json
+{
+  "authToken": "your-global-api-auth-token",
+  "senderId": "919876543210"  
+}
+```
+
+**Response:**
+```json
+{
+  "success": true,
+  "message": "Authentication in progress. Please wait...",
+  "data": {
+    "senderId": "919876543210",
+    "state": "AUTHENTICATION_IN_PROGRESS",
+    "isConnected": false,
+    "databaseStatus": "connecting",
+    "shouldStopPolling": true,
+    "socketState": 0,
+    "details": "WhatsApp authentication/linking in progress",
+    "suggestion": "Wait for authentication to complete. Do not scan additional QR codes.",
+    "qrInfo": {
+      "hasQR": true,
+      "age": 8500,
+      "expired": false
+    },
+    "timestamp": "2024-01-01T10:30:00.000Z"
+  }
+}
+```
+
+#### Usage for Smart Polling
+
+```javascript
+async function checkAuthenticationStatus() {
+    try {
+        const response = await fetch('/api/getAuthStatus', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                authToken: 'your-token',
+                senderId: '919876543210'
+            })
+        });
+        
+        const data = await response.json();
+        
+        if (data.success) {
+            switch (data.data.state) {
+                case 'CONNECTED':
+                    showMessage('✅ WhatsApp Connected Successfully!');
+                    onAuthenticationSuccess();
+                    break;
+                    
+                case 'AUTHENTICATION_IN_PROGRESS':
+                    showMessage('🔄 Authentication in progress...');
+                    // Check again in 5 seconds
+                    setTimeout(checkAuthenticationStatus, 5000);
+                    break;
+                    
+                case 'QR_EXPIRED':
+                case 'NEED_FRESH_START':
+                    showMessage('QR code expired. Generating new one...');
+                    shouldPoll = true;
+                    startQRPolling();
+                    break;
+                    
+                default:
+                    console.log('Auth state:', data.data.state);
+                    setTimeout(checkAuthenticationStatus, 3000);
+            }
+        }
+    } catch (error) {
+        console.error('Auth status error:', error);
+        setTimeout(checkAuthenticationStatus, 5000);
+    }
+}
+```
+
+#### Best Practices for Frontend
+
+1. **Use `shouldStopPolling` flag** - Always respect this flag to prevent authentication interference
+2. **Check authentication status** - Use `/api/getAuthStatus` to monitor progress
+3. **Handle all states** - Implement proper UI feedback for each authentication state  
+4. **Avoid rapid polling** - Don't request QR codes more than once every 10-15 seconds
+5. **Show clear messages** - Inform users about authentication progress
+
+**Complete Frontend Flow:**
+```
+1. Start QR polling
+2. User sees QR code
+3. User scans QR code
+4. API returns shouldStopPolling: true
+5. Stop QR polling immediately  
+6. Start checking authentication status
+7. Show "Authentication in progress" message
+8. Wait for CONNECTED state
+9. Redirect to main interface
+```
+
+---
+
 ### 3. Validate WhatsApp Number
 Check if a phone number is registered on WhatsApp before sending messages.
 
@@ -224,7 +447,7 @@ Send a text message to a WhatsApp number or group with automatic validation.
 ---
 
 ### 5. Send Media Message
-Send media files with automatic validation and URL support to individuals or groups.
+Send media files with automatic validation and URL support to individuals or groups. **The original filename from the URL is automatically preserved for documents.**
 
 **Endpoint:** `POST /api/sendMediaSMS`
 
@@ -234,7 +457,7 @@ Send media files with automatic validation and URL support to individuals or gro
   "authToken": "your-global-api-auth-token",
   "senderId": "919876543210", 
   "receiverId": "919876543211",
-  "mediaurl": "https://example.com/image.jpg",
+  "mediaurl": "https://example.com/santosh-Sale-4-2025-26-182117_1749559882.pdf",
   "caption": "Optional caption for the media"
 }
 ```
@@ -259,8 +482,9 @@ Send media files with automatic validation and URL support to individuals or gro
     "messageId": "message-unique-id",
     "senderId": "919876543210",
     "receiverId": "919876543211",
-    "mediaurl": "https://example.com/image.jpg",
-    "mediaType": "image/jpeg",
+    "mediaurl": "https://example.com/santosh-Sale-4-2025-26-182117_1749559882.pdf",
+    "mediaType": "application/pdf",
+    "fileName": "santosh-Sale-4-2025-26-182117_1749559882.pdf",
     "caption": "Optional caption",
     "validation": {
       "isRegistered": true,
@@ -271,6 +495,13 @@ Send media files with automatic validation and URL support to individuals or gro
   }
 }
 ```
+
+**🎯 Filename Preservation:**
+- ✅ **PDF files**: `document.pdf` → `santosh-Sale-4-2025-26-182117_1749559882.pdf` 
+- ✅ **Excel files**: `document.xlsx` → `financial-report-2024.xlsx`
+- ✅ **Word docs**: `document.docx` → `meeting-notes-jan-2024.docx`
+- ✅ **Images/Videos**: Original filename preserved for all media types
+- ✅ **Automatic fallback**: If filename cannot be extracted, uses generic naming
 
 #### Supported Receiver ID Formats
 
@@ -397,35 +628,7 @@ Display QR code in server terminal for easy scanning.
 
 ---
 
-### 10. Logout Session
-Logout from WhatsApp (session can be reconnected later with QR code).
-
-**Endpoint:** `POST /api/logoutSession`
-
-**Request Body:**
-```json
-{
-  "authToken": "your-global-api-auth-token",
-  "senderId": "919876543210"
-}
-```
-
-**Response:**
-```json
-{
-  "success": true,
-  "message": "Session logged out successfully",
-  "data": {
-    "senderId": "919876543210",
-    "status": "logged_out",
-    "timestamp": "2024-01-01T00:00:00.000Z"
-  }
-}
-```
-
----
-
-### 11. Delete Session
+### 10. Delete Session
 Permanently delete session from database and remove session folder.
 
 **Endpoint:** `POST /api/deleteSession`
@@ -451,6 +654,42 @@ Permanently delete session from database and remove session folder.
   }
 }
 ```
+
+---
+
+### 11. Logout Session
+Logout from WhatsApp and clear all authentication files (requires QR code scan for reconnection).
+
+**Endpoint:** `POST /api/logoutSession`
+
+**Request Body:**
+```json
+{
+  "authToken": "your-global-api-auth-token",
+  "senderId": "919876543210"
+}
+```
+
+**Response:**
+```json
+{
+  "success": true,
+  "message": "Session logged out successfully and authentication files cleared",
+  "data": {
+    "senderId": "919876543210",
+    "status": "logged_out",
+    "authFilesCleared": true,
+    "timestamp": "2024-01-01T00:00:00.000Z",
+    "note": "QR code scan will be required for next connection"
+  }
+}
+```
+
+**Important Notes:**
+- ⚠️ **Authentication files are permanently deleted** during logout
+- 🔄 **QR code scan required** for future connections
+- 📁 **All credential files cleared** from the auth directory
+- ✅ **Session can be restored** by scanning a new QR code
 
 ---
 
@@ -480,360 +719,97 @@ Update webhook URL and/or enable/disable webhook status in a single comprehensiv
 ```
 
 #### Update Both URL and Status
-```json
+```
+```
+
+## 🔧 **QR Code Authentication Issues & Solutions**
+
+### **Common Problem: QR Code Interference During Authentication**
+
+**Issue:** Users scan QR code but device shows timeout/connection failure due to:
+- Frontend continuously requesting new QR codes every 15 seconds
+- Stream errors during authentication causing QR regeneration
+- Multiple QR codes interfering with WhatsApp linking process
+
+**Root Cause:** After user scans QR code, WhatsApp starts authentication but:
+1. Stream errors cause socket reconnection
+2. Reconnection clears authentication state
+3. Frontend continues requesting QR codes
+4. New QR codes interrupt authentication process
+
+### **✅ Solution: Authentication State Preservation**
+
+The API now includes **robust authentication state preservation** that:
+
+#### **🔐 Authentication State Detection**
+- **`AUTHENTICATION_IN_PROGRESS`** - User has scanned QR, linking in progress
+- **`QR_VALID`** - QR code is fresh and ready for scanning
+- **`QR_EXPIRED`** - QR expired but socket reusable
+- **`CONNECTED`** - Session successfully connected
+
+#### **🛡️ Stream Error Resilience**
+- Preserves authentication state during `restartRequired` errors
+- Prevents QR regeneration during authentication process
+- Maintains state across socket reconnections
+- 2-minute timeout for authentication completion
+
+#### **📱 Frontend Integration**
+```javascript
+// Enhanced response format tells frontend when to stop polling
 {
-  "authToken": "your-global-api-auth-token",
-  "senderId": "919876543210",
-  "webhookUrl": "https://your-domain.com/webhook",
-  "webhookStatus": true
+  "qrCode": "data:image/png;base64,iVBORw0KGgoAAAANSU...",
+  "state": "AUTHENTICATION_IN_PROGRESS",
+  "shouldStopPolling": true,  // ← Frontend should stop requesting QR codes
+  "message": "QR code scanned. Authentication in progress. Please wait...",
+  "estimatedWaitTime": 30000
 }
 ```
 
-#### Alternative Parameter Names (Aliases)
-```json
-{
-  "authToken": "your-global-api-auth-token",
-  "sessionId": "919876543210",
-  "url": "https://your-domain.com/webhook",
-  "status": false
-}
-```
-
-```json
-{
-  "authToken": "your-global-api-auth-token",
-  "senderId": "919876543210",
-  "enabled": true
-}
-```
-
-**Response:**
-```json
-{
-  "success": true,
-  "message": "Webhook configuration updated successfully",
-  "data": {
-    "senderId": "919876543210",
-    "webhookUrl": "https://your-domain.com/webhook",
-    "webhookStatus": true,
-    "webhookEnabled": true,
-    "isActive": true,
-    "timestamp": "2024-01-01T00:00:00.000Z",
-    "sessionStatus": "connected",
-    "updated": {
-      "url": true,
-      "status": true
-    }
+#### **🔄 Best Practices for Frontend**
+```javascript
+async function handleQRPolling() {
+  const response = await fetch('/api/getQRCode', {
+    method: 'POST',
+    body: JSON.stringify({ authToken, senderId })
+  });
+  
+  const data = await response.json();
+  
+  // Stop polling when authentication is in progress
+  if (data.shouldStopPolling) {
+    console.log('Authentication in progress - stopping QR requests');
+    clearInterval(pollingInterval);
+    
+    // Start monitoring authentication status instead
+    startAuthStatusMonitoring();
+    return;
   }
+  
+  // Display QR code normally
+  displayQRCode(data.qrCode);
 }
 ```
 
-#### Parameter Flexibility
+### **🐛 Debugging Authentication Issues**
 
-| Parameter | Aliases | Type | Description |
-|-----------|---------|------|-------------|
-| `senderId` | `sessionId` | String | Session identifier |
-| `webhookUrl` | `url` | String | Webhook URL (HTTP/HTTPS) |
-| `webhookStatus` | `status`, `enabled` | Boolean | Enable/disable webhook |
-
-**Features:**
-- ✅ Update URL only, status only, or both together
-- ✅ Multiple parameter aliases for flexibility
-- ✅ Preserves existing values when updating single field
-- ✅ URL validation for proper HTTP/HTTPS format
-- ✅ Boolean conversion for status parameters
-- ✅ Comprehensive response with current state
-
----
-
-### 13. Test Webhook
-Test webhook endpoint with a sample message.
-
-**Endpoint:** `POST /api/testWebhook`
-
-**Request Body:**
-```json
-{
-  "authToken": "your-global-api-auth-token",
-  "senderId": "919876543210",
-  "webhookUrl": "https://your-domain.com/webhook"
-}
-```
-
-**Response:**
-```json
-{
-  "success": true,
-  "message": "Webhook test completed",
-  "data": {
-    "senderId": "919876543210",
-    "webhookTest": {
-      "success": true,
-      "status": 200,
-      "response": "OK"
-    }
-  }
-}
-```
-
-### Webhook Message Format
-
-When webhook is enabled, incoming messages are sent to your webhook URL in this format:
-
-```json
-{
-  "sessionId": "919876543210",
-  "messageId": "message-unique-id",
-  "remoteJid": "919876543211@s.whatsapp.net",
-  "fromMe": false,
-  "timestamp": 1640995200000,
-  "message": {
-    "type": "text",
-    "content": "Hello from WhatsApp!"
-  },
-  "participant": null,
-  "pushName": "John Doe"
-}
-```
-
-### Webhook Usage Examples
-
-**Set up webhook for first time:**
+#### **Log Analysis:**
+Look for these patterns in logs:
 ```bash
-curl -X POST http://localhost:3000/api/updateWebhook \
-  -H "Content-Type: application/json" \
-  -d '{
-    "authToken": "your-token",
-    "senderId": "919876543210",
-    "webhookUrl": "https://your-domain.com/webhook",
-    "webhookStatus": true
-  }'
+# Good - Authentication preserved during stream error
+"PRESERVING authentication state during restart"
+"Authentication in progress for 15s - QR scanned or linking active"
+
+# Bad - Authentication state lost
+"Starting fresh authentication process"
+"QR code expired, generating fresh QR without clearing auth"
 ```
 
-**Enable existing webhook:**
+#### **Session Monitoring:**
 ```bash
-curl -X POST http://localhost:3000/api/updateWebhook \
+# Check session status
+curl -X POST http://localhost:3000/api/getAuthStatus \
   -H "Content-Type: application/json" \
-  -d '{
-    "authToken": "your-token",
-    "senderId": "919876543210",
-    "status": true
-  }'
-```
-
-**Change webhook URL:**
-```bash
-curl -X POST http://localhost:3000/api/updateWebhook \
-  -H "Content-Type: application/json" \
-  -d '{
-    "authToken": "your-token",
-    "senderId": "919876543210",
-    "url": "https://new-domain.com/webhook"
-  }'
-```
-
-**Disable webhook:**
-```bash
-curl -X POST http://localhost:3000/api/updateWebhook \
-  -H "Content-Type: application/json" \
-  -d '{
-    "authToken": "your-token",
-    "senderId": "919876543210",
-    "enabled": false
-  }'
+  -d '{"authToken":"your-token","senderId":"919876543210"}'
 ```
 
 ---
-
-## 🏗️ Project Structure
-
-```
-whatsapp-api-baileys/
-├── src/
-│   ├── database/
-│   │   └── db.js                 # SQLite database operations
-│   │   
-│   ├── routes/
-│   │   └── api.js                # API endpoints
-│   │   
-│   ├── services/
-│   │   ├── baileys-session.js    # WhatsApp session management
-│   │   ├── session-manager.js    # Multi-session coordinator
-│   │   └── webhook-manager.js    # Webhook handling
-│   │   
-│   ├── utils/
-│   │   └── logger.js             # Winston logger configuration
-│   │   
-│   └── server.js                 # Express server
-├── sessions/                     # Session storage
-│   └── {sessionId}/
-│       └── auth/                 # Authentication files
-├── data/                         # Database files
-├── logs/                         # Application logs
-├── ecosystem.config.js           # PM2 configuration
-├── docker-compose.yml           # Docker composition
-├── Dockerfile                   # Docker container
-└── package.json                # Dependencies
-```
-
-## 🚀 Deployment
-
-### Using PM2 (Recommended)
-```bash
-# Install PM2 globally
-npm install -g pm2
-
-# Start with PM2
-npm run pm2:start
-
-# Monitor
-npm run pm2:monit
-
-# View logs
-npm run pm2:logs
-
-# Stop
-npm run pm2:stop
-```
-
-### Using Docker
-```bash
-# Build and run with docker-compose
-docker-compose up -d
-
-# Or build manually
-docker build -t whatsapp-api .
-docker run -p 3000:3000 whatsapp-api
-```
-
-## 📊 Session Management
-
-### Session Operations
-
-| Operation | Endpoint | Description | Recoverable |
-|-----------|----------|-------------|-------------|
-| **Create** | `POST /api/createSession` | Create new WhatsApp session | N/A |
-| **Logout** | `POST /api/logoutSession` | Logout from WhatsApp (keeps data) | ✅ Yes - scan QR again |
-| **Delete** | `POST /api/deleteSession` | Permanently remove session & folder | ❌ No - data lost forever |
-
-### Session Lifecycle
-
-1. **Create** → Session created in database
-2. **QR Scan** → WhatsApp authentication 
-3. **Connected** → Ready to send/receive messages
-4. **Logout** → Disconnected but can reconnect
-5. **Delete** → Permanently removed
-
-### Session Storage Structure
-```
-./sessions/
-├── {senderId}/
-│   └── auth/
-│       ├── creds.json
-│       ├── session-*.json
-│       ├── pre-key-*.json
-│       └── app-state-sync-*.json
-```
-
-### Database Schema
-```sql
--- Sessions table
-CREATE TABLE sessions (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    session_id TEXT UNIQUE NOT NULL,
-    name TEXT,
-    auth_token TEXT,
-    status TEXT DEFAULT 'disconnected',
-    auto_read BOOLEAN DEFAULT 0,
-    webhook_status BOOLEAN DEFAULT 0,
-    webhook_url TEXT,
-    user_id TEXT,
-    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
-);
-```
-
-## 🔧 Configuration
-
-### Environment Variables
-| Variable | Description | Default |
-|----------|-------------|---------|
-| `PORT` | Server port | `3000` |
-| `NODE_ENV` | Environment | `development` |
-| `DB_PATH` | Database path | `./data/whatsapp_sessions.db` |
-| `SESSION_STORAGE_PATH` | Sessions directory | `./sessions` |
-| `MAX_CONCURRENT_SESSIONS` | Max sessions | `100` |
-| `AUTH_TOKEN` | Global API auth token | Required |
-| `LOG_LEVEL` | Logging level | `info` |
-| `WEBHOOK_TIMEOUT` | Webhook timeout (ms) | `5000` |
-| `WEBHOOK_RETRY_ATTEMPTS` | Webhook retries | `3` |
-
-## 🛡️ Security Features
-
-- Global authentication token for API access
-- WhatsApp number validation to prevent spam
-- Session isolation with individual auth folders
-- Webhook retry logic with exponential backoff
-- Comprehensive error handling and logging
-- Process-level error handlers to prevent crashes
-
-## 🚦 Health Check
-
-**Endpoint:** `GET /health`
-
-**Response:**
-```json
-{
-  "status": "OK",
-  "timestamp": "2024-01-01T00:00:00.000Z",
-  "uptime": "0:05:30",
-  "service": "WhatsApp API",
-  "version": "1.0.0"
-}
-```
-
-## 📝 Logging
-
-The application uses Winston for comprehensive logging:
-
-- **Error logs**: `./logs/error.log`
-- **Combined logs**: `./logs/combined.log`  
-- **Session logs**: `./logs/sessions.log`
-- **PM2 logs**: `./logs/pm2-*.log`
-
-## 🐛 Troubleshooting
-
-### Common Issues
-
-1. **QR Code not generating**: Ensure session is created and not already connected
-2. **Messages failing**: Check number validation and session connection status
-3. **Session disconnections**: Check logs for specific error messages
-4. **Database errors**: Ensure proper permissions on `./data/` directory
-
-### Debug Mode
-```bash
-LOG_LEVEL=debug npm start
-```
-
-## 🤝 Contributing
-
-1. Fork the repository
-2. Create a feature branch
-3. Make your changes
-4. Add tests if applicable
-5. Submit a pull request
-
-## 📄 License
-
-This project is licensed under the MIT License.
-
-## 🆘 Support
-
-For issues and questions:
-- Create an issue on GitHub
-- Check the logs for detailed error information
-- Ensure all prerequisites are met
-
----
-
-**Built with ❤️ using [Baileys](https://github.com/WhiskeySockets/Baileys) WhatsApp library**

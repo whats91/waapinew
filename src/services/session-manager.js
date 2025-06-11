@@ -636,46 +636,30 @@ class SessionManager {
         }
     }
 
-    async sendMediaMessage(senderId, receiverId, mediaBuffer, mediaType, caption = '') {
+    async sendMediaMessage(senderId, receiverId, mediaBuffer, mediaType, caption = '', fileName = null) {
+        const session = await this.getSessionBySenderId(senderId);
+        
+        if (!session) {
+            throw new Error(`Session not found for senderId: ${senderId}`);
+        }
+
         try {
-            // Use enhanced session creation with auto-recovery
-            const session = await this.createOrRecoverSession(senderId);
-            
-            if (!session) {
-                throw new Error(`Failed to create or recover session for senderId ${senderId}`);
-            }
-
-            // Wait for connection with timeout
-            if (!session.isSessionConnected()) {
-                logger.info('Session not connected, waiting for connection', { senderId });
-                await this.waitForConnection(session, 30000);
-            }
-
-            return await session.sendMediaMessage(receiverId, mediaBuffer, mediaType, caption);
+            return await session.sendMediaMessage(receiverId, mediaBuffer, mediaType, caption, fileName);
         } catch (error) {
-            logger.error('Error in sendMediaMessage with auto-recovery', { 
-                senderId, 
+            logger.error('Error in sendMediaMessage with auto-recovery', {
+                senderId,
                 receiverId, 
-                error: error.message 
+                error: error.message,
+                fileName: fileName
             });
-            
-            // If session fails, try one more time with fresh session
-            try {
-                logger.info('Retrying with fresh session', { senderId });
-                await this.autoReconnectSession(senderId);
-                const freshSession = this.sessions.get(senderId);
-                
-                if (freshSession && freshSession.isSessionConnected()) {
-                    return await freshSession.sendMediaMessage(receiverId, mediaBuffer, mediaType, caption);
-                }
-            } catch (retryError) {
-                logger.error('Retry with fresh session also failed', { 
-                    senderId, 
-                    error: retryError.message 
-                });
+
+            // Auto-recovery: try to reconnect and send again
+            const freshSession = await this.autoReconnectSession(senderId);
+            if (!freshSession) {
+                throw new Error(`Unable to recover session for senderId: ${senderId}`);
             }
-            
-            throw error;
+
+            return await freshSession.sendMediaMessage(receiverId, mediaBuffer, mediaType, caption, fileName);
         }
     }
 
@@ -715,7 +699,7 @@ class SessionManager {
         }
     }
 
-    // New method specifically for API QR requests - doesn't trigger auto-recovery
+    // Enhanced QR code API with proper caching and authentication state management
     async getQRCodeForAPI(senderId) {
         try {
             logger.info('API QR code requested', { senderId });
@@ -740,117 +724,92 @@ class SessionManager {
                 await session.initializeWithoutConnection();
             }
             
-            // Check if we have a valid QR code in memory
             const now = Date.now();
             
-            // If socket is actively connecting (linking in progress), extend QR validity and don't interrupt
-            if (session.socket && session.socket.readyState === 0) { // CONNECTING state - WhatsApp is linking
-                logger.info('Socket is in CONNECTING state - device linking in progress', { senderId });
-                
-                // Extend QR cache time to 60 seconds during linking process
-                if (session.qrCodeData && session.qrCodeTimestamp && (now - session.qrCodeTimestamp < 60000)) {
-                    logger.info('Returning existing QR code - linking in progress', { 
-                        senderId, 
-                        age: `${now - session.qrCodeTimestamp}ms`,
-                        socketState: 'CONNECTING'
-                    });
-                    return session.qrCodeData;
-                }
+            // CRITICAL: Check if user is already connected - if so, no QR needed
+            if (session.isSessionConnected()) {
+                logger.info('Session already connected, no QR needed', { senderId });
+                throw new Error('Session already connected. No QR code needed.');
             }
             
-            // Check for recent QR code (less than 15 seconds old) for normal cases
-            if (session.qrCodeData && session.qrCodeTimestamp && (now - session.qrCodeTimestamp < 15000)) {
-                logger.info('Returning cached QR code', { 
-                    senderId, 
-                    age: `${now - session.qrCodeTimestamp}ms`,
-                    reason: 'Recent QR still valid'
-                });
-                return session.qrCodeData;
-            }
-            
-            // Only generate new QR if:
-            // 1. No QR exists
-            // 2. QR is older than 15 seconds AND socket is not connecting
-            // 3. Socket is closed or failed
-            
-            const shouldGenerateNewQR = !session.qrCodeData || 
-                                       !session.qrCodeTimestamp ||
-                                       (session.socket && session.socket.readyState === 3) || // CLOSED
-                                       (!session.socket && (now - session.qrCodeTimestamp > 15000));
-            
-            if (!shouldGenerateNewQR) {
-                logger.info('Preserving existing QR and socket state', { 
-                    senderId,
-                    socketState: session.socket?.readyState,
-                    qrAge: session.qrCodeTimestamp ? `${now - session.qrCodeTimestamp}ms` : 'none'
-                });
-                return session.qrCodeData;
-            }
-            
-            logger.info('Generating fresh QR code', { 
-                senderId,
-                reason: !session.qrCodeData ? 'No QR exists' : 
-                       !session.socket ? 'No socket' :
-                       session.socket.readyState === 3 ? 'Socket closed' : 'QR expired',
-                socketState: session.socket?.readyState
+            // Enhanced authentication state detection
+            const authenticationState = this.getAuthenticationState(session);
+            logger.info('Authentication state analysis', { 
+                senderId, 
+                state: authenticationState.state,
+                socketState: authenticationState.socketState,
+                details: authenticationState.details
             });
             
-            // Set flag to prevent auto-reconnection during QR generation
-            session.isGeneratingQR = true;
-            
-            // Only clear auth data if socket is truly failed or closed
-            // Never clear during CONNECTING state (readyState === 0)
-            const shouldClearAuth = !session.socket || 
-                                   session.socket.readyState === 3 || // CLOSED only
-                                   (session.qrCodeTimestamp && (now - session.qrCodeTimestamp > 120000)); // QR older than 2 minutes
-            
-            if (shouldClearAuth) {
-                logger.info('Clearing old authentication data for fresh start', { senderId });
-                const fs = require('fs');
-                const path = require('path');
-                const authPath = path.join(process.env.SESSION_STORAGE_PATH || './sessions', senderId, 'auth');
-                
-                if (fs.existsSync(authPath)) {
-                    try {
-                        fs.rmSync(authPath, { recursive: true, force: true });
-                        logger.info('Cleared old authentication data', { senderId });
-                    } catch (clearError) {
-                        logger.warn('Error clearing auth data', { senderId, error: clearError.message });
+            // State-based QR code management
+            switch (authenticationState.state) {
+                case 'AUTHENTICATION_TIMEOUT':
+                    // Authentication has timed out - clear state and generate fresh QR
+                    logger.info('Authentication timed out - clearing state for fresh start', { senderId });
+                    await this.clearAuthenticationData(session, senderId);
+                    // Don't return here, let it fall through to generate fresh QR
+                    break;
+                    
+                case 'AUTHENTICATION_IN_PROGRESS':
+                    // User has scanned QR, authentication is happening - NEVER generate new QR
+                    logger.info('Authentication in progress - preserving state', { senderId });
+                    if (session.qrCodeData) {
+                        return {
+                            qrCode: session.qrCodeData,
+                            state: 'AUTHENTICATION_IN_PROGRESS',
+                            message: 'QR code scanned. Authentication in progress. Please wait...',
+                            shouldStopPolling: true, // Tell frontend to stop requesting QR codes
+                            estimatedWaitTime: 30000, // 30 seconds
+                            authDuration: authenticationState.authDuration || 0,
+                            autoDetected: authenticationState.autoDetected || false
+                        };
+                    } else {
+                        throw new Error('Authentication in progress. Please wait for completion.');
                     }
-                }
-                
-                // Re-initialize session without authentication data
-                await session.initializeWithoutConnection();
-                
-                // Destroy existing socket only if it's not connecting
-                if (session.socket && session.socket.readyState !== 0) {
-                    try {
-                        session.socket.end();
-                    } catch (e) {
-                        // Ignore errors when ending socket
-                    }
-                    session.socket = null;
-                    session.qrCodeData = null;
-                    session.qrCodeString = null;
-                    session.qrCodeTimestamp = null;
-                }
-            } else {
-                logger.info('Preserving auth data and socket state', { 
-                    senderId,
-                    socketState: session.socket?.readyState,
-                    reason: 'Socket connecting or recent activity'
-                });
+                    
+                case 'QR_VALID':
+                    // QR code is still valid and fresh - return cached version
+                    logger.info('Returning cached valid QR code', { 
+                        senderId, 
+                        age: `${now - session.qrCodeTimestamp}ms`
+                    });
+                    return {
+                        qrCode: session.qrCodeData,
+                        state: 'QR_READY',
+                        message: 'QR code ready for scanning',
+                        shouldStopPolling: false,
+                        expiresIn: Math.max(0, 20000 - (now - session.qrCodeTimestamp)) // Show remaining time
+                    };
+                    
+                case 'QR_EXPIRED':
+                    // QR code has expired but socket is still good - generate new QR without clearing auth
+                    logger.info('QR expired, generating fresh QR without clearing auth', { senderId });
+                    break;
+                    
+                case 'NEED_FRESH_START':
+                    // Need to start completely fresh
+                    logger.info('Starting fresh authentication process', { senderId });
+                    await this.clearAuthenticationData(session, senderId);
+                    break;
+                    
+                case 'SOCKET_ERROR':
+                    // Socket is in error state - restart
+                    logger.info('Socket error detected, restarting', { senderId });
+                    await this.restartSessionSocket(session, senderId);
+                    break;
+                    
+                default:
+                    logger.info('Unknown authentication state, proceeding with caution', { senderId });
             }
             
-            // Set QR display mode for API request
+            // Generate new QR code
+            session.isGeneratingQR = true;
             session.setQRDisplayMode(true, true);
             
-            // Connect to generate fresh QR code only if no socket or socket is closed
+            // Only create new socket if none exists or it's closed
             if (!session.socket || session.socket.readyState === 3) {
-                logger.info('Creating new connection for QR generation', { senderId });
-                session.connect().catch(error => {
-                    logger.error('Error in background connection for QR', { senderId, error: error.message });
-                });
+                logger.info('Creating new socket for QR generation', { senderId });
+                await session.connect();
             } else {
                 logger.info('Using existing socket for QR generation', { 
                     senderId,
@@ -858,28 +817,236 @@ class SessionManager {
                 });
             }
             
-            // Wait briefly for QR code generation
+            // Wait for QR code generation with enhanced timeout
             let attempts = 0;
-            while (attempts < 30 && !session.qrCodeData) { // Max 3 seconds (30 * 100ms)
+            const maxAttempts = 50; // 5 seconds (50 * 100ms)
+            
+            while (attempts < maxAttempts && !session.qrCodeData) {
                 await new Promise(resolve => setTimeout(resolve, 100));
                 attempts++;
+                
+                // Check if session got connected while waiting (QR was scanned very quickly)
+                if (session.isSessionConnected()) {
+                    session.isGeneratingQR = false;
+                    logger.info('Session connected while generating QR', { senderId });
+                    throw new Error('Session connected successfully. No QR code needed.');
+                }
             }
+            
+            session.isGeneratingQR = false;
             
             if (session.qrCodeData) {
                 // Store timestamp for expiry tracking
                 session.qrCodeTimestamp = Date.now();
-                session.isGeneratingQR = false; // Clear flag
-                logger.info('QR code generated successfully', { senderId });
-                return session.qrCodeData;
+                logger.info('Fresh QR code generated successfully', { senderId });
+                
+                return {
+                    qrCode: session.qrCodeData,
+                    state: 'QR_READY',
+                    message: 'Fresh QR code generated. Please scan with WhatsApp.',
+                    shouldStopPolling: false,
+                    expiresIn: 20000, // 20 seconds
+                    generatedAt: session.qrCodeTimestamp
+                };
             } else {
-                session.isGeneratingQR = false; // Clear flag even on failure
-                // Return a placeholder or error
-                throw new Error('QR code not ready. Please wait a moment and try again.');
+                throw new Error('QR code generation failed. Please try again.');
             }
             
         } catch (error) {
             logger.error('Error in getQRCodeForAPI', { senderId, error: error.message });
             throw error;
+        }
+    }
+    
+    // Helper method to analyze authentication state
+    getAuthenticationState(session) {
+        const now = Date.now();
+        const socketState = session.socket?.readyState;
+        
+        // Check if session is already connected
+        if (session.isSessionConnected()) {
+            return {
+                state: 'CONNECTED',
+                socketState: socketState,
+                details: 'Session is already connected'
+            };
+        }
+        
+        // NEW: Check if authentication is actively in progress using new flags
+        if (session.isAuthenticating || session.qrCodeScanned || session.preventQRRegeneration) {
+            const authDuration = session.authenticationStartTime ? now - session.authenticationStartTime : 0;
+            
+            // Check for authentication timeout (more than 60 seconds)
+            if (authDuration > 60000) {
+                logger.warn('Authentication timeout detected - may need manual intervention', { 
+                    senderId: session.sessionId,
+                    authDuration: authDuration,
+                    socketExists: !!session.socket,
+                    socketState: session.socket?.readyState
+                });
+                
+                return {
+                    state: 'AUTHENTICATION_TIMEOUT',
+                    socketState: socketState,
+                    details: `Authentication timeout after ${Math.round(authDuration / 1000)}s - may need fresh QR`,
+                    authDuration: authDuration,
+                    autoDetected: false,
+                    timeout: true
+                };
+            }
+            
+            // Allow up to 60 seconds for authentication to complete (reduced from 120s)
+            if (authDuration < 60000) {
+                return {
+                    state: 'AUTHENTICATION_IN_PROGRESS',
+                    socketState: socketState,
+                    details: `Authentication in progress for ${Math.round(authDuration / 1000)}s - QR scanned or linking active`,
+                    authDuration: authDuration,
+                    autoDetected: false // Default, will be overridden if needed
+                };
+            } else {
+                // Authentication has been going on too long, reset
+                logger.info('Authentication timeout - resetting state', { 
+                    senderId: session.sessionId,
+                    authDuration: authDuration
+                });
+                session.clearAuthenticationState();
+            }
+        }
+        
+        // NEW: Check for timing-based auto-detection
+        if (session.qrCodeTimestamp) {
+            const qrAge = now - session.qrCodeTimestamp;
+            
+            // If QR was generated recently and we had a stream error, it's likely authentication
+            if (qrAge < 30000 && session.qrCodeData && !session.isConnected) {
+                // Check if this might be authentication based on timing patterns
+                const couldBeAuthentication = qrAge > 5000 && qrAge < 30000; // Between 5-30 seconds
+                
+                if (couldBeAuthentication) {
+                    return {
+                        state: 'AUTHENTICATION_IN_PROGRESS',
+                        socketState: socketState,
+                        details: `Potential authentication detected - QR is ${Math.round(qrAge / 1000)}s old`,
+                        authDuration: qrAge,
+                        autoDetected: true
+                    };
+                }
+            }
+        }
+        
+        // Check if authentication is actively in progress via socket state
+        if (session.socket && socketState === 0) { // CONNECTING state
+            return {
+                state: 'AUTHENTICATION_IN_PROGRESS',
+                socketState: socketState,
+                details: 'WhatsApp authentication/linking in progress via socket state'
+            };
+        }
+        
+        // Check if we have a valid recent QR code
+        if (session.qrCodeData && session.qrCodeTimestamp) {
+            const qrAge = now - session.qrCodeTimestamp;
+            
+            if (qrAge < 20000) { // QR valid for 20 seconds
+                return {
+                    state: 'QR_VALID',
+                    socketState: socketState,
+                    details: `QR code is ${qrAge}ms old, still valid`
+                };
+            } else if (qrAge < 120000) { // Less than 2 minutes old
+                return {
+                    state: 'QR_EXPIRED',
+                    socketState: socketState,
+                    details: `QR code expired (${qrAge}ms old), but socket may be reusable`
+                };
+            }
+        }
+        
+        // Check socket state
+        if (session.socket) {
+            if (socketState === 3) { // CLOSED
+                return {
+                    state: 'SOCKET_ERROR',
+                    socketState: socketState,
+                    details: 'Socket is closed, needs restart'
+                };
+            } else if (socketState === 2) { // CLOSING
+                return {
+                    state: 'SOCKET_ERROR',
+                    socketState: socketState,
+                    details: 'Socket is closing, needs restart'
+                };
+            }
+        }
+        
+        // Default to fresh start
+        return {
+            state: 'NEED_FRESH_START',
+            socketState: socketState,
+            details: 'No valid QR or socket state, starting fresh'
+        };
+    }
+    
+    // Helper method to clear authentication data
+    async clearAuthenticationData(session, senderId) {
+        try {
+            logger.info('Clearing authentication data for fresh start', { senderId });
+            const fs = require('fs');
+            const path = require('path');
+            const authPath = path.join(process.env.SESSION_STORAGE_PATH || './sessions', senderId, 'auth');
+            
+            if (fs.existsSync(authPath)) {
+                fs.rmSync(authPath, { recursive: true, force: true });
+                logger.info('Authentication data cleared', { senderId });
+            }
+            
+            // Re-initialize session
+            await session.initializeWithoutConnection();
+            
+            // Clear socket and QR data
+            if (session.socket) {
+                try {
+                    session.socket.end();
+                } catch (e) {
+                    // Ignore errors
+                }
+                session.socket = null;
+            }
+            
+            session.qrCodeData = null;
+            session.qrCodeString = null;
+            session.qrCodeTimestamp = null;
+            
+            // NEW: Clear authentication state flags
+            session.clearAuthenticationState();
+            
+        } catch (error) {
+            logger.warn('Error clearing authentication data', { senderId, error: error.message });
+        }
+    }
+    
+    // Helper method to restart session socket
+    async restartSessionSocket(session, senderId) {
+        try {
+            logger.info('Restarting session socket', { senderId });
+            
+            if (session.socket) {
+                try {
+                    session.socket.end();
+                } catch (e) {
+                    // Ignore errors
+                }
+                session.socket = null;
+            }
+            
+            // Clear QR data to force regeneration
+            session.qrCodeData = null;
+            session.qrCodeString = null;
+            session.qrCodeTimestamp = null;
+            
+        } catch (error) {
+            logger.warn('Error restarting socket', { senderId, error: error.message });
         }
     }
 

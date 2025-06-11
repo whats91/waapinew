@@ -3,9 +3,33 @@ const axios = require('axios');
 const path = require('path');
 const fs = require('fs');
 const mimeTypes = require('mime-types');
+const multer = require('multer');
 const logger = require('../utils/logger');
 
 const router = express.Router();
+
+// Configure multer for file uploads (session migration)
+const storage = multer.memoryStorage(); // Store files in memory for processing
+const upload = multer({
+    storage: storage,
+    limits: {
+        fileSize: 10 * 1024 * 1024, // 10MB limit for credential files
+        files: 20 // Allow multiple credential files (Baileys uses multiple auth files)
+    },
+    fileFilter: (req, file, cb) => {
+        // Allow common credential file extensions and JSON files
+        const allowedExtensions = ['.json', '.creds', '.keys', '.txt', ''];
+        const fileExtension = path.extname(file.originalname).toLowerCase();
+        
+        if (allowedExtensions.includes(fileExtension) || file.originalname.startsWith('creds.json') || 
+            file.originalname.includes('pre-key') || file.originalname.includes('session') ||
+            file.originalname.includes('sender-key')) {
+            cb(null, true);
+        } else {
+            cb(new Error('Invalid file type. Only credential files are allowed.'), false);
+        }
+    }
+});
 
 // Middleware to validate auth token
 const validateAuthToken = (req, res, next) => {
@@ -128,9 +152,45 @@ router.post('/getQRCode', validateAuthToken, validateSenderId, async (req, res) 
         logger.api('/getQRCode', 'QR code requested', { senderId });
         
         // Use the new API-specific method that doesn't trigger auto-recovery
-        const qrCodeData = await sessionManager.getQRCodeForAPI(senderId);
+        const qrResponse = await sessionManager.getQRCodeForAPI(senderId);
         
-        if (!qrCodeData) {
+        // Handle different response types from enhanced QR API
+        if (typeof qrResponse === 'object' && qrResponse.qrCode) {
+            // Enhanced response with state information
+            res.json({
+                success: true,
+                message: qrResponse.message || 'QR code generated successfully',
+                data: {
+                    qrCode: qrResponse.qrCode,
+                    senderId: senderId,
+                    state: qrResponse.state,
+                    shouldStopPolling: qrResponse.shouldStopPolling || false,
+                    expiresIn: qrResponse.expiresIn || null,
+                    estimatedWaitTime: qrResponse.estimatedWaitTime || null,
+                    generatedAt: qrResponse.generatedAt || Date.now(),
+                    message: qrResponse.message,
+                    note: qrResponse.state === 'AUTHENTICATION_IN_PROGRESS' 
+                        ? 'Authentication in progress. Please wait and avoid scanning new QR codes.'
+                        : 'QR code has been displayed in the terminal'
+                }
+            });
+        } else if (typeof qrResponse === 'string') {
+            // Legacy response format (just QR code string)
+            res.json({
+                success: true,
+                message: 'QR code generated successfully',
+                data: {
+                    qrCode: qrResponse,
+                    senderId: senderId,
+                    state: 'QR_READY',
+                    shouldStopPolling: false,
+                    expiresIn: 20000,
+                    message: 'Scan this QR code with WhatsApp to connect your session',
+                    note: 'QR code has been displayed in the terminal'
+                }
+            });
+        } else {
+            // No QR code available
             return res.status(404).json({
                 success: false,
                 message: 'QR code not available',
@@ -141,29 +201,50 @@ router.post('/getQRCode', validateAuthToken, validateSenderId, async (req, res) 
                 }
             });
         }
-
-        // QR code is already displayed in terminal by the BaileysSession
-        // No need for additional terminal display here
-        
-        res.json({
-            success: true,
-            message: 'QR code generated successfully',
-            data: {
-                qrCode: qrCodeData,
-                senderId: senderId,
-                message: 'Scan this QR code with WhatsApp to connect your session',
-                expiresIn: '~20 seconds',
-                note: 'QR code has been displayed in the terminal'
-            }
-        });
         
     } catch (error) {
         logger.error('Error in /getQRCode', { error: error.message, senderId: req.body?.senderId });
+        
+        // Handle specific error cases
+        if (error.message.includes('already connected')) {
+            return res.status(409).json({
+                success: false,
+                message: 'Session already connected',
+                error: error.message,
+                data: {
+                    senderId: req.body?.senderId,
+                    state: 'ALREADY_CONNECTED',
+                    shouldStopPolling: true,
+                    suggestion: 'Session is already active. No QR code needed.'
+                }
+            });
+        }
+        
+        if (error.message.includes('Authentication in progress')) {
+            return res.status(202).json({
+                success: false,
+                message: 'Authentication in progress',
+                error: error.message,
+                data: {
+                    senderId: req.body?.senderId,
+                    state: 'AUTHENTICATION_IN_PROGRESS',
+                    shouldStopPolling: true,
+                    estimatedWaitTime: 30000,
+                    suggestion: 'Please wait for authentication to complete.'
+                }
+            });
+        }
+        
         res.status(500).json({
             success: false,
             message: 'Failed to generate QR code',
             error: error.message,
-            senderId: req.body?.senderId
+            data: {
+                senderId: req.body?.senderId,
+                state: 'ERROR',
+                shouldStopPolling: false,
+                suggestion: 'Try again in a few seconds'
+            }
         });
     }
 });
@@ -330,6 +411,7 @@ router.post('/sendMediaSMS', validateAuthToken, validateSenderId, checkSessionEx
         
         let mediaBuffer;
         let mediaType;
+        let originalFileName;
         
         // Download media from URL
         try {
@@ -338,6 +420,28 @@ router.post('/sendMediaSMS', validateAuthToken, validateSenderId, checkSessionEx
                 receiverId: finalReceiverId, 
                 mediaurl: finalMediaUrl 
             });
+            
+            // Extract filename from URL
+            try {
+                const url = new URL(finalMediaUrl);
+                const pathname = url.pathname;
+                // Get the last part of the path (filename)
+                originalFileName = pathname.split('/').pop();
+                
+                // Clean up filename and decode URL encoding
+                if (originalFileName) {
+                    originalFileName = decodeURIComponent(originalFileName);
+                    // Remove query parameters if any
+                    originalFileName = originalFileName.split('?')[0];
+                    // Ensure filename has an extension
+                    if (!originalFileName.includes('.')) {
+                        originalFileName = null; // Will use default naming
+                    }
+                }
+            } catch (urlError) {
+                logger.warn('Could not extract filename from URL', { mediaurl: finalMediaUrl, error: urlError.message });
+                originalFileName = null;
+            }
             
             const response = await axios.get(finalMediaUrl, {
                 responseType: 'arraybuffer',
@@ -361,7 +465,7 @@ router.post('/sendMediaSMS', validateAuthToken, validateSenderId, checkSessionEx
             });
         }
         
-        const result = await sessionManager.sendMediaMessage(finalSenderId, finalReceiverId, mediaBuffer, mediaType, finalCaption);
+        const result = await sessionManager.sendMediaMessage(finalSenderId, finalReceiverId, mediaBuffer, mediaType, finalCaption, originalFileName);
         
         res.json({
             success: true,
@@ -372,6 +476,7 @@ router.post('/sendMediaSMS', validateAuthToken, validateSenderId, checkSessionEx
                 receiverId: finalReceiverId,
                 mediaurl: finalMediaUrl,
                 mediaType: mediaType,
+                fileName: originalFileName,
                 caption: finalCaption,
                 sessionStatus: req.sessionData.status,
                 validation: result.validationResult ? {
@@ -1272,13 +1377,50 @@ router.post('/logoutSession', validateAuthToken, validateSenderId, checkSessionE
             logger.info('Session marked as logged out (was not active)', { sessionId: finalSenderId });
         }
         
+        // Delete all authentication files after successful logout
+        try {
+            const sessionDir = path.join(process.env.SESSION_STORAGE_PATH || './sessions', finalSenderId);
+            const authDir = path.join(sessionDir, 'auth');
+            
+            if (fs.existsSync(authDir)) {
+                // Get list of files before deletion for logging
+                const authFiles = fs.readdirSync(authDir);
+                
+                // Delete all authentication files
+                fs.rmSync(authDir, { recursive: true, force: true });
+                
+                // Recreate empty auth directory
+                fs.mkdirSync(authDir, { recursive: true });
+                
+                logger.info('Authentication files deleted after logout', { 
+                    sessionId: finalSenderId,
+                    deletedFiles: authFiles,
+                    authDir: authDir
+                });
+                
+                console.log(`🗑️ LOGOUT: Deleted ${authFiles.length} authentication files for session ${finalSenderId}`);
+                console.log(`📁 Files deleted: ${authFiles.join(', ')}`);
+            } else {
+                logger.info('No authentication directory found to delete', { sessionId: finalSenderId });
+            }
+        } catch (deleteError) {
+            // Log the error but don't fail the logout operation
+            logger.error('Error deleting authentication files after logout', { 
+                sessionId: finalSenderId, 
+                error: deleteError.message 
+            });
+            console.log(`❌ Warning: Could not delete auth files for session ${finalSenderId}: ${deleteError.message}`);
+        }
+        
         res.json({
             success: true,
-            message: 'Session logged out successfully',
+            message: 'Session logged out successfully and authentication files cleared',
             data: {
                 senderId: finalSenderId,
                 status: 'logged_out',
-                timestamp: new Date().toISOString()
+                authFilesCleared: true,
+                timestamp: new Date().toISOString(),
+                note: 'QR code scan will be required for next connection'
             }
         });
         
@@ -1774,6 +1916,455 @@ router.post('/testAppTypeDetection', validateAuthToken, async (req, res) => {
             message: 'Failed to test app type detection',
             error: error.message,
             senderId: req.body?.senderId
+        });
+    }
+});
+
+// Session migration endpoint - Upload credential files for existing sessions no need to validate auth token
+router.post('/migrateSession', upload.array('credFiles'), async (req, res) => {
+    try {
+        const { senderId, sessionId, restartSession = true, overwriteExisting = false } = req.body;
+        const files = req.files;
+        
+        // Use alias if main parameter is not provided
+        const finalSenderId = senderId || sessionId;
+        
+        if (!finalSenderId) {
+            return res.status(400).json({
+                success: false,
+                message: 'Missing required parameter',
+                error: 'senderId (or sessionId) is required'
+            });
+        }
+        
+        if (!files || files.length === 0) {
+            return res.status(400).json({
+                success: false,
+                message: 'Missing credential files',
+                error: 'At least one credential file is required'
+            });
+        }
+        
+        // Validate senderId format
+        if (!isValidSenderId(finalSenderId)) {
+            return res.status(400).json({
+                success: false,
+                message: 'Invalid sender ID format',
+                error: 'Invalid senderId format. Must be a valid phone number (8-15 digits, no country code +)'
+            });
+        }
+        
+        logger.api('/migrateSession', 'Session migration requested', { 
+            senderId: finalSenderId, 
+            fileCount: files.length,
+            fileNames: files.map(f => f.originalname)
+        });
+        
+        // Create session directory structure
+        const sessionDir = path.join(process.env.SESSION_STORAGE_PATH || './sessions', finalSenderId);
+        const authDir = path.join(sessionDir, 'auth');
+        
+        // Ensure directories exist
+        if (!fs.existsSync(sessionDir)) {
+            fs.mkdirSync(sessionDir, { recursive: true });
+        }
+        if (!fs.existsSync(authDir)) {
+            fs.mkdirSync(authDir, { recursive: true });
+        }
+        
+        // Check if session already exists
+        const existingSession = await sessionManager.database.getSession(finalSenderId);
+        if (existingSession && !overwriteExisting) {
+            // Check if auth files already exist
+            const existingFiles = fs.readdirSync(authDir);
+            if (existingFiles.length > 0) {
+                return res.status(409).json({
+                    success: false,
+                    message: 'Session already exists with credential files',
+                    error: 'Session already has credential files. Use overwriteExisting=true to replace them.',
+                    data: {
+                        senderId: finalSenderId,
+                        existingFiles: existingFiles,
+                        sessionStatus: existingSession.status
+                    }
+                });
+            }
+        }
+        
+        // Store uploaded files in auth directory
+        const storedFiles = [];
+        const errors = [];
+        
+        for (const file of files) {
+            try {
+                const fileName = file.originalname;
+                const filePath = path.join(authDir, fileName);
+                
+                // Validate JSON files to ensure they contain valid credential data
+                if (fileName.endsWith('.json')) {
+                    try {
+                        const jsonContent = JSON.parse(file.buffer.toString());
+                        
+                        // Basic validation for Baileys credential files
+                        if (fileName.includes('creds') && !jsonContent.noiseKey) {
+                            throw new Error('Invalid credentials file - missing noiseKey');
+                        }
+                        
+                        // Store the validated JSON with proper formatting
+                        fs.writeFileSync(filePath, JSON.stringify(jsonContent, null, 2));
+                    } catch (jsonError) {
+                        errors.push({
+                            fileName: fileName,
+                            error: `Invalid JSON file: ${jsonError.message}`
+                        });
+                        continue;
+                    }
+                } else {
+                    // Store binary/text files as-is
+                    fs.writeFileSync(filePath, file.buffer);
+                }
+                
+                storedFiles.push({
+                    fileName: fileName,
+                    size: file.size,
+                    path: filePath
+                });
+                
+                logger.info('Credential file stored', { 
+                    sessionId: finalSenderId, 
+                    fileName: fileName,
+                    size: file.size 
+                });
+                
+            } catch (fileError) {
+                errors.push({
+                    fileName: file.originalname,
+                    error: fileError.message
+                });
+                logger.error('Error storing credential file', { 
+                    sessionId: finalSenderId, 
+                    fileName: file.originalname,
+                    error: fileError.message 
+                });
+            }
+        }
+        
+        // Create or update session in database if it doesn't exist
+        if (!existingSession) {
+            try {
+                await sessionManager.createSession(finalSenderId, false, {
+                    name: `Migrated Session - ${finalSenderId}`,
+                    user_id: finalSenderId,
+                    admin_id: null,
+                    webhook_url: null
+                });
+                logger.info('Session created for migration', { sessionId: finalSenderId });
+            } catch (createError) {
+                logger.error('Error creating session for migration', { 
+                    sessionId: finalSenderId, 
+                    error: createError.message 
+                });
+            }
+        }
+        
+        // Optionally restart the session to use new credentials
+        let sessionRestarted = false;
+        if (restartSession && storedFiles.length > 0) {
+            try {
+                // Check if session is currently active and destroy it
+                const activeSession = await sessionManager.getSessionBySenderId(finalSenderId);
+                if (activeSession) {
+                    await activeSession.destroy();
+                    logger.info('Active session destroyed for migration', { sessionId: finalSenderId });
+                }
+                
+                // Initialize new session with migrated credentials
+                await sessionManager.autoReconnectSession(finalSenderId);
+                sessionRestarted = true;
+                logger.info('Session restarted with migrated credentials', { sessionId: finalSenderId });
+                
+            } catch (restartError) {
+                logger.error('Error restarting session after migration', { 
+                    sessionId: finalSenderId, 
+                    error: restartError.message 
+                });
+                // Don't fail the entire migration if restart fails
+            }
+        }
+        
+        // Prepare response
+        const response = {
+            success: true,
+            message: 'Session migration completed',
+            data: {
+                sessionId: finalSenderId,
+                filesProcessed: files.length,
+                filesStored: storedFiles.length,
+                filesWithErrors: errors.length,
+                storedFiles: storedFiles,
+                errors: errors,
+                sessionRestarted: sessionRestarted,
+                timestamp: new Date().toISOString()
+            }
+        };
+        
+        if (errors.length > 0) {
+            response.message = 'Session migration completed with some errors';
+            response.warning = 'Some files could not be processed. Check the errors array for details.';
+        }
+        
+        res.json(response);
+        
+    } catch (error) {
+        logger.error('Error in /migrateSession', { error: error.message });
+        res.status(500).json({
+            success: false,
+            message: 'Failed to migrate session',
+            error: error.message
+        });
+    }
+});
+
+// Get session migration status
+router.get('/migrationStatus/:senderId', async (req, res) => {
+    try {
+        const { senderId } = req.params;
+        const { authToken } = req.query;
+        
+        // Validate authToken from query parameter
+        if (!authToken || authToken !== process.env.AUTH_TOKEN) {
+            return res.status(401).json({
+                success: false,
+                message: 'Authentication failed',
+                error: 'Invalid or missing authToken'
+            });
+        }
+        
+        if (!isValidSenderId(senderId)) {
+            return res.status(400).json({
+                success: false,
+                message: 'Invalid sender ID format',
+                error: 'Invalid senderId format'
+            });
+        }
+        
+        logger.api('/migrationStatus', 'Migration status requested', { senderId });
+        
+        // Check session directory and files
+        const sessionDir = path.join(process.env.SESSION_STORAGE_PATH || './sessions', senderId);
+        const authDir = path.join(sessionDir, 'auth');
+        
+        const migrationStatus = {
+            sessionId: senderId,
+            sessionDirExists: fs.existsSync(sessionDir),
+            authDirExists: fs.existsSync(authDir),
+            credentialFiles: [],
+            sessionInDatabase: false,
+            sessionActive: false,
+            timestamp: new Date().toISOString()
+        };
+        
+        // Get credential files
+        if (migrationStatus.authDirExists) {
+            try {
+                const files = fs.readdirSync(authDir);
+                migrationStatus.credentialFiles = files.map(file => {
+                    const filePath = path.join(authDir, file);
+                    const stats = fs.statSync(filePath);
+                    return {
+                        fileName: file,
+                        size: stats.size,
+                        modified: stats.mtime,
+                        isJSON: file.endsWith('.json')
+                    };
+                });
+            } catch (fileError) {
+                migrationStatus.credentialFilesError = fileError.message;
+            }
+        }
+        
+        // Check database
+        try {
+            const sessionData = await sessionManager.database.getSession(senderId);
+            if (sessionData) {
+                migrationStatus.sessionInDatabase = true;
+                migrationStatus.sessionData = {
+                    status: sessionData.status,
+                    createdAt: sessionData.created_at,
+                    updatedAt: sessionData.updated_at,
+                    userId: sessionData.user_id,
+                    adminId: sessionData.admin_id
+                };
+            }
+        } catch (dbError) {
+            migrationStatus.databaseError = dbError.message;
+        }
+        
+        // Check if session is currently active
+        try {
+            const activeSession = await sessionManager.getSessionBySenderId(senderId);
+            if (activeSession) {
+                migrationStatus.sessionActive = true;
+                migrationStatus.activeSessionInfo = {
+                    connected: activeSession.isSessionConnected(),
+                    hasQRCode: !!activeSession.getQRCode(),
+                    hasAuthData: activeSession.hasAuthData()
+                };
+            }
+        } catch (activeError) {
+            migrationStatus.activeSessionError = activeError.message;
+        }
+        
+        res.json({
+            success: true,
+            message: 'Migration status retrieved',
+            data: migrationStatus
+        });
+        
+    } catch (error) {
+        logger.error('Error in /migrationStatus', { error: error.message, senderId: req.params?.senderId });
+        res.status(500).json({
+            success: false,
+            message: 'Failed to get migration status',
+            error: error.message
+        });
+    }
+});
+
+// Get Authentication Status endpoint - helps frontend manage QR polling
+router.post('/getAuthStatus', validateAuthToken, validateSenderId, async (req, res) => {
+    try {
+        const { senderId } = req.body;
+        
+        logger.api('/getAuthStatus', 'Authentication status requested', { senderId });
+        
+        // Check if session exists in database
+        const sessionData = await sessionManager.database.getSession(senderId);
+        if (!sessionData) {
+            return res.status(404).json({
+                success: false,
+                message: 'Session not found',
+                error: `Session not found for senderId: ${senderId}. Please create session first.`,
+                data: {
+                    senderId: senderId,
+                    state: 'SESSION_NOT_FOUND',
+                    shouldStopPolling: true,
+                    suggestion: 'Use POST /api/createSession to create a new session'
+                }
+            });
+        }
+        
+        // Get session from memory if it exists
+        const session = await sessionManager.getSessionBySenderId(senderId);
+        
+        if (!session) {
+            return res.json({
+                success: true,
+                message: 'Session exists but not in memory',
+                data: {
+                    senderId: senderId,
+                    state: 'SESSION_NOT_IN_MEMORY',
+                    isConnected: false,
+                    databaseStatus: sessionData.status,
+                    shouldStopPolling: false,
+                    suggestion: 'Request QR code to start authentication'
+                }
+            });
+        }
+        
+        // Check if already connected
+        if (session.isSessionConnected()) {
+            return res.json({
+                success: true,
+                message: 'Session is connected',
+                data: {
+                    senderId: senderId,
+                    state: 'CONNECTED',
+                    isConnected: true,
+                    databaseStatus: sessionData.status,
+                    shouldStopPolling: true,
+                    connectionInfo: session.getConnectionInfo ? session.getConnectionInfo() : null,
+                    message: 'WhatsApp session is active and ready'
+                }
+            });
+        }
+        
+        // Analyze authentication state
+        const authState = sessionManager.getAuthenticationState(session);
+        
+        let shouldStopPolling = false;
+        let message = '';
+        let suggestion = '';
+        
+        switch (authState.state) {
+            case 'AUTHENTICATION_IN_PROGRESS':
+                shouldStopPolling = true;
+                message = 'Authentication in progress. Please wait...';
+                suggestion = 'Wait for authentication to complete. Do not scan additional QR codes.';
+                break;
+                
+            case 'QR_VALID':
+                shouldStopPolling = false;
+                message = 'QR code is available and valid';
+                suggestion = 'You can continue polling for QR codes or scan the current one';
+                break;
+                
+            case 'QR_EXPIRED':
+                shouldStopPolling = false;
+                message = 'QR code has expired, new one needed';
+                suggestion = 'Request a new QR code';
+                break;
+                
+            case 'NEED_FRESH_START':
+                shouldStopPolling = false;
+                message = 'Ready for new authentication';
+                suggestion = 'Request QR code to start authentication';
+                break;
+                
+            case 'SOCKET_ERROR':
+                shouldStopPolling = false;
+                message = 'Connection error, recovery needed';
+                suggestion = 'Request QR code to restart authentication';
+                break;
+                
+            default:
+                shouldStopPolling = false;
+                message = 'Unknown authentication state';
+                suggestion = 'Request QR code to check status';
+        }
+        
+        res.json({
+            success: true,
+            message: message,
+            data: {
+                senderId: senderId,
+                state: authState.state,
+                isConnected: false,
+                databaseStatus: sessionData.status,
+                shouldStopPolling: shouldStopPolling,
+                socketState: authState.socketState,
+                details: authState.details,
+                suggestion: suggestion,
+                qrInfo: session.qrCodeTimestamp ? {
+                    hasQR: !!session.qrCodeData,
+                    age: Date.now() - session.qrCodeTimestamp,
+                    expired: (Date.now() - session.qrCodeTimestamp) > 20000
+                } : null,
+                timestamp: new Date().toISOString()
+            }
+        });
+        
+    } catch (error) {
+        logger.error('Error in /getAuthStatus', { error: error.message, senderId: req.body?.senderId });
+        res.status(500).json({
+            success: false,
+            message: 'Failed to get authentication status',
+            error: error.message,
+            data: {
+                senderId: req.body?.senderId,
+                state: 'ERROR',
+                shouldStopPolling: false
+            }
         });
     }
 });
