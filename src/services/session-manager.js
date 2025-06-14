@@ -3,6 +3,8 @@ const WebhookManager = require('./webhook-manager');
 const Database = require('../database/db');
 const logger = require('../utils/logger');
 const { v4: uuidv4 } = require('uuid');
+const fs = require('fs');
+const path = require('path');
 
 class SessionManager {
     constructor() {
@@ -25,6 +27,11 @@ class SessionManager {
         this.maxSessionUsagePerMinute = parseInt(process.env.MAX_SESSION_USAGE_PER_MINUTE) || 20; // Max 20 messages per minute per session
         this.sessionCooldownPeriod = parseInt(process.env.SESSION_COOLDOWN_PERIOD) || 60000; // 1 minute cooldown
         
+        // NEW: Periodic health monitor
+        this.healthCheckInterval = null;
+        this.healthCheckEnabled = true;
+        this.healthCheckIntervalTime = 2 * 60 * 1000; // 2 minutes
+        
         // Initialize existing sessions asynchronously but safely
         this.initializeExistingSessions().catch(error => {
             logger.error('Failed to initialize existing sessions during startup', { error: error.message });
@@ -36,6 +43,9 @@ class SessionManager {
         } else {
             logger.info('Auto-refresh disabled via configuration');
         }
+
+        // Start health monitor
+        this.startHealthMonitor();
     }
 
     startSessionHealthMonitoring() {
@@ -236,6 +246,28 @@ class SessionManager {
                 }
             }
             
+            // ENHANCED: Validate auth files before attempting recovery
+            logger.info('Validating session auth files before recovery', { sessionId });
+            const authValidation = await session.validateAuthFiles();
+            
+            if (!authValidation.valid) {
+                logger.warn('Auth files corrupted, attempting backup restoration', { 
+                    sessionId, 
+                    reason: authValidation.reason 
+                });
+                
+                // Try to restore from backup before proceeding
+                const restored = await session.restoreSessionFromBackupSequential();
+                if (restored) {
+                    logger.info('Auth files restored from backup successfully', { sessionId });
+                } else {
+                    logger.error('Failed to restore auth files from backup', { sessionId });
+                    // Continue with recovery attempt anyway
+                }
+            } else {
+                logger.info('Auth files validation passed', { sessionId });
+            }
+            
             // Check if this session should be auto-reconnected based on its authentication data
             const hasExistingAuth = await this.checkForExistingAuth(sessionId);
             
@@ -334,7 +366,7 @@ class SessionManager {
 
     async createOrRecoverSession(sessionId) {
         // Enhanced session creation with automatic recovery
-        let session = this.sessions.get(sessionId);
+        let session = await this.getSessionBySenderId(sessionId);
         
         if (session) {
             // Session exists, check if it's healthy
@@ -344,13 +376,13 @@ class SessionManager {
                 // Session exists but disconnected, recover it
                 logger.info('Found disconnected session, attempting recovery', { sessionId });
                 await this.autoReconnectSession(sessionId);
-                return this.sessions.get(sessionId);
+                return await this.getSessionBySenderId(sessionId);
             }
         }
         
         // Session doesn't exist, create new one
         await this.createSession(sessionId, false);
-        return this.sessions.get(sessionId);
+        return await this.getSessionBySenderId(sessionId);
     }
 
     async initializeExistingSessions() {
@@ -519,7 +551,6 @@ class SessionManager {
     // Helper method to check if session has existing authentication data
     async checkForExistingAuth(sessionId) {
         try {
-            const fs = require('fs');
             const path = require('path');
             const authDir = path.join(process.env.SESSION_STORAGE_PATH || './sessions', sessionId, 'auth');
             const credsPath = path.join(authDir, 'creds.json');
@@ -606,7 +637,8 @@ class SessionManager {
     }
 
     async logoutSession(sessionId) {
-        const session = this.sessions.get(sessionId);
+        // CRITICAL FIX: Use getSessionBySenderId to get the actual BaileysSession instance
+        const session = await this.getSessionBySenderId(sessionId);
         
         if (!session) {
             // Session not in memory, check if it exists in database
@@ -622,6 +654,12 @@ class SessionManager {
         }
 
         try {
+            // CRITICAL: Disable backup system to prevent restoration interference during logout
+            if (session.setBackupEnabled) {
+                session.setBackupEnabled(false);
+                logger.info('Backup system disabled for logout', { sessionId });
+            }
+            
             // Session is active in memory, perform proper logout
             await session.logout();
             this.sessions.delete(sessionId);
@@ -629,7 +667,7 @@ class SessionManager {
             // Update database status
             await this.database.updateSessionStatus(sessionId, 'logged_out');
             
-            logger.info('Session logged out', { sessionId });
+            logger.info('Session logged out successfully', { sessionId });
             return true;
         } catch (error) {
             logger.error('Failed to logout session', { sessionId, error: error.message });
@@ -645,7 +683,6 @@ class SessionManager {
 
         try {
             // Delete session folder from filesystem
-            const fs = require('fs');
             const path = require('path');
             const sessionPath = path.join(process.env.SESSION_STORAGE_PATH || './sessions', sessionId);
             
@@ -665,58 +702,159 @@ class SessionManager {
         }
     }
 
+    // Enhanced method to send text message with better timeout and error handling
     async sendTextMessage(senderId, receiverId, messageText) {
         try {
-            // Use enhanced session creation with auto-recovery
-            const session = await this.createOrRecoverSession(senderId);
-            
+            logger.info('Text message send requested', { 
+                senderId, 
+                receiverId, 
+                messageLength: messageText.length,
+                endpoint: '/sendTextSMS'
+            });
+
+            // CRITICAL FIX: Use getSessionBySenderId to get the actual BaileysSession instance
+            const session = await this.getSessionBySenderId(senderId);
             if (!session) {
-                throw new Error(`Failed to create or recover session for senderId ${senderId}`);
+                throw new Error('Session not found in memory');
             }
 
-            // Wait for connection with timeout
+            // ENHANCED: Check session status in database first
+            const sessionData = await this.database.getSession(senderId);
+            if (!sessionData) {
+                throw new Error('Session not found in database');
+            }
+
+            // CRITICAL: Handle sessions that require QR scan
+            if (sessionData.status === 'requires_qr' || sessionData.status === 'logged_out') {
+                logger.warn('Session requires fresh QR scan', { 
+                    senderId, 
+                    currentStatus: sessionData.status,
+                    reason: 'Invalid credentials detected'
+                });
+                throw new Error('Session requires fresh QR scan. Please generate a new QR code and scan with your device.');
+            }
+
+            // ENHANCED: Check if session is connected with timeout protection
             if (!session.isSessionConnected()) {
-                logger.info('Session not connected, waiting for connection', { senderId });
-                await this.waitForConnection(session, 30000);
+                logger.info('Session not connected, attempting auto-reconnect', { senderId });
+                
+                // Auto-reconnect with timeout
+                const reconnectPromise = this.autoReconnectSession(senderId);
+                const timeoutPromise = new Promise((_, reject) => 
+                    setTimeout(() => reject(new Error('Auto-reconnect timeout')), 15000) // 15 second timeout
+                );
+                
+                try {
+                    await Promise.race([reconnectPromise, timeoutPromise]);
+                    logger.info('Auto-reconnect completed', { senderId });
+                } catch (reconnectError) {
+                    logger.error('Auto-reconnect failed or timed out', { 
+                        senderId, 
+                        error: reconnectError.message 
+                    });
+                    
+                    // If auto-reconnect fails, check if it's due to invalid credentials
+                    if (reconnectError.message.includes('401') || 
+                        reconnectError.message.includes('loggedOut') ||
+                        reconnectError.message.includes('timeout')) {
+                        
+                        // Check if session has had multiple failures
+                        if (session.consecutiveLogoutAttempts >= 2) {
+                            logger.warn('Multiple connection failures detected - session may need QR reset', { 
+                                senderId,
+                                consecutiveFailures: session.consecutiveLogoutAttempts
+                            });
+                            throw new Error('Session connection repeatedly failing. Please generate a new QR code.');
+                        }
+                    }
+                    
+                    throw new Error(`Auto-reconnect failed: ${reconnectError.message}`);
+                }
             }
 
-            return await session.sendTextMessage(receiverId, messageText);
+            // ENHANCED: Wait for connection with reduced timeout
+            logger.info('Session not connected, waiting for connection', { senderId });
+            try {
+                await this.waitForConnection(session, 15000); // Reduced from 30s to 15s
+                logger.info('Session connected, sending message', { senderId });
+            } catch (waitError) {
+                logger.warn('Session connection wait timed out', { senderId });
+                
+                // CRITICAL: Check session status after timeout
+                const currentSessionData = await this.database.getSession(senderId);
+                if (currentSessionData && (currentSessionData.status === 'requires_qr' || currentSessionData.status === 'logged_out')) {
+                    throw new Error('Session requires fresh QR scan due to connection timeout. Please generate a new QR code.');
+                }
+                
+                throw new Error('Connection timeout - session failed to connect within 15 seconds');
+            }
+
+            // ENHANCED: Send message with timeout protection
+            const sendPromise = session.sendTextMessage(receiverId, messageText);
+            const sendTimeoutPromise = new Promise((_, reject) => 
+                setTimeout(() => reject(new Error('Message send timeout')), 20000) // 20 second timeout
+            );
+            
+            const result = await Promise.race([sendPromise, sendTimeoutPromise]);
+            
+            logger.info('Text message sent successfully', { senderId, receiverId });
+            return result;
+
         } catch (error) {
             logger.error('Error in sendTextMessage with auto-recovery', { 
                 senderId, 
                 receiverId, 
                 error: error.message 
             });
-            
-            // If session fails, try one more time with fresh session
-            try {
-                logger.info('Retrying with fresh session', { senderId });
-                await this.autoReconnectSession(senderId);
-                const freshSession = this.sessions.get(senderId);
+
+            // ENHANCED: Specific error handling for different failure types
+            if (error.message.includes('Connection timeout') || 
+                error.message.includes('timeout') ||
+                error.message.includes('Auto-reconnect timeout')) {
                 
-                if (freshSession && freshSession.isSessionConnected()) {
-                    return await freshSession.sendTextMessage(receiverId, messageText);
+                // For timeout errors, try one more time with fresh session
+                logger.info('Retrying with fresh session', { senderId });
+                try {
+                    const retryReconnectPromise = this.autoReconnectSession(senderId);
+                    const retryTimeoutPromise = new Promise((_, reject) => 
+                        setTimeout(() => reject(new Error('Retry auto-reconnect timeout')), 10000) // 10 second timeout for retry
+                    );
+                    
+                    await Promise.race([retryReconnectPromise, retryTimeoutPromise]);
+                    
+                    // Get fresh session reference
+                    const freshSession = await this.getSessionBySenderId(senderId);
+                    if (freshSession && freshSession.isSessionConnected()) {
+                        const retryResult = await freshSession.sendTextMessage(receiverId, messageText);
+                        logger.info('Message sent successfully on retry', { senderId, receiverId });
+                        return retryResult;
+                    } else {
+                        throw new Error('Fresh session still not connected');
+                    }
+                } catch (retryError) {
+                    logger.error('Retry also failed', { senderId, error: retryError.message });
+                    throw new Error(`Connection timeout - retry failed: ${retryError.message}`);
                 }
-            } catch (retryError) {
-                logger.error('Retry with fresh session also failed', { 
-                    senderId, 
-                    error: retryError.message 
-                });
+            } else if (error.message.includes('QR') || 
+                      error.message.includes('requires fresh') ||
+                      error.message.includes('Invalid credentials')) {
+                // For QR/credential errors, don't retry - user needs to scan QR
+                throw error;
             }
-            
+
             throw error;
         }
     }
 
     async sendMediaMessage(senderId, receiverId, mediaBuffer, mediaType, caption = '', fileName = null) {
         try {
-            // CRITICAL: Check if session recovery is already in progress
-            const session = this.sessions.get(senderId);
+            // CRITICAL FIX: Use getSessionBySenderId to get the actual BaileysSession instance
+            const session = await this.getSessionBySenderId(senderId);
             
             if (!session) {
                 logger.info('Session not found, creating new session', { senderId });
                 await this.createOrRecoverSession(senderId);
-                const newSession = this.sessions.get(senderId);
+                const newSession = await this.getSessionBySenderId(senderId);
                 
                 if (!newSession) {
                     throw new Error(`Failed to create session for senderId: ${senderId}`);
@@ -765,7 +903,7 @@ class SessionManager {
             
             // Attempt auto-reconnection
             await this.autoReconnectSession(senderId);
-            const recoveredSession = this.sessions.get(senderId);
+            const recoveredSession = await this.getSessionBySenderId(senderId);
             
             if (!recoveredSession) {
                 throw new Error(`Unable to recover session for senderId: ${senderId}`);
@@ -792,7 +930,7 @@ class SessionManager {
                     logger.info('Attempting final recovery with fresh session', { senderId });
                     
                     // Destroy existing session completely
-                    const existingSession = this.sessions.get(senderId);
+                    const existingSession = await this.getSessionBySenderId(senderId);
                     if (existingSession) {
                         await existingSession.destroy();
                         this.sessions.delete(senderId);
@@ -800,7 +938,7 @@ class SessionManager {
                     
                     // Create completely fresh session
                     await this.createSession(senderId, false);
-                    const freshSession = this.sessions.get(senderId);
+                    const freshSession = await this.getSessionBySenderId(senderId);
                     
                     if (freshSession && freshSession.isSessionConnected()) {
                         return await freshSession.sendMediaMessage(receiverId, mediaBuffer, mediaType, caption, fileName);
@@ -862,8 +1000,8 @@ class SessionManager {
         try {
             logger.info('API QR code requested', { senderId });
             
-            // Get existing session or create a minimal one
-            let session = this.sessions.get(senderId);
+            // CRITICAL FIX: Use getSessionBySenderId to get existing session or create a minimal one
+            let session = await this.getSessionBySenderId(senderId);
             
             if (!session) {
                 // Create session without auto-recovery
@@ -889,7 +1027,7 @@ class SessionManager {
                 logger.info('Session already connected, no QR needed', { senderId });
                 throw new Error('Session already connected. No QR code needed.');
             }
-            
+
             // Enhanced authentication state detection
             const authenticationState = this.getAuthenticationState(session);
             logger.info('Authentication state analysis', { 
@@ -1150,7 +1288,6 @@ class SessionManager {
     async clearAuthenticationData(session, senderId) {
         try {
             logger.info('Clearing authentication data for fresh start', { senderId });
-            const fs = require('fs');
             const path = require('path');
             const authPath = path.join(process.env.SESSION_STORAGE_PATH || './sessions', senderId, 'auth');
             
@@ -1165,9 +1302,38 @@ class SessionManager {
             // Clear socket and QR data
             if (session.socket) {
                 try {
-                    session.socket.end();
+                    // CRITICAL FIX: Safe socket cleanup in clearAuthenticationData
+                    const socketReadyState = session.socket.readyState;
+                    
+                    if (typeof socketReadyState !== 'undefined') {
+                        if (socketReadyState === 0 || socketReadyState === 1) {
+                            // Socket is CONNECTING or OPEN - safe to end
+                            logger.info('clearAuthenticationData: Socket in safe state, calling end()', { senderId });
+                            session.socket.end();
+                        } else {
+                            logger.info('clearAuthenticationData: Socket not in safe state, skipping end()', {
+                                senderId,
+                                readyState: socketReadyState,
+                                stateName: ['CONNECTING', 'OPEN', 'CLOSING', 'CLOSED'][socketReadyState] || 'UNKNOWN'
+                            });
+                        }
+                    } else {
+                        // Socket doesn't have readyState - check for internal state
+                        const hasInternalState = session.socket._socket || session.socket.readyState !== undefined;
+                        
+                        if (hasInternalState) {
+                            logger.info('clearAuthenticationData: Socket has internal state, attempting end()', { senderId });
+                            session.socket.end();
+                        } else {
+                            logger.info('clearAuthenticationData: Socket lacks internal state, skipping end() to prevent crash', { senderId });
+                        }
+                    }
                 } catch (e) {
                     // Ignore errors
+                    logger.warn('Error during clearAuthenticationData socket cleanup', {
+                        senderId,
+                        error: e.message
+                    });
                 }
                 session.socket = null;
             }
@@ -1191,9 +1357,38 @@ class SessionManager {
             
             if (session.socket) {
                 try {
-                    session.socket.end();
+                    // CRITICAL FIX: Safe socket cleanup in restartSessionSocket
+                    const socketReadyState = session.socket.readyState;
+                    
+                    if (typeof socketReadyState !== 'undefined') {
+                        if (socketReadyState === 0 || socketReadyState === 1) {
+                            // Socket is CONNECTING or OPEN - safe to end
+                            logger.info('restartSessionSocket: Socket in safe state, calling end()', { senderId });
+                            session.socket.end();
+                        } else if (socketReadyState === 2 || socketReadyState === 3) {
+                            logger.info('restartSessionSocket: Socket is CLOSING/CLOSED, no end() needed', {
+                                senderId,
+                                readyState: socketReadyState,
+                                stateName: ['CONNECTING', 'OPEN', 'CLOSING', 'CLOSED'][socketReadyState] || 'UNKNOWN'
+                            });
+                        }
+                    } else {
+                        // Socket doesn't have readyState - check for internal state
+                        const hasInternalState = session.socket._socket || session.socket.readyState !== undefined;
+                        
+                        if (hasInternalState) {
+                            logger.info('restartSessionSocket: Socket has internal state, attempting end()', { senderId });
+                            session.socket.end();
+                        } else {
+                            logger.info('restartSessionSocket: Socket lacks internal state, skipping end() to prevent crash', { senderId });
+                        }
+                    }
                 } catch (e) {
                     // Ignore errors
+                    logger.warn('Error during restartSessionSocket socket cleanup', {
+                        senderId,
+                        error: e.message
+                    });
                 }
                 session.socket = null;
             }
@@ -1213,7 +1408,7 @@ class SessionManager {
             logger.info('API QR string requested', { senderId });
             
             // Get existing session or create a minimal one
-            let session = this.sessions.get(senderId);
+            let session = await this.getSessionBySenderId(senderId);
             
             if (!session) {
                 // Create session without auto-recovery
@@ -1294,7 +1489,6 @@ class SessionManager {
             
             if (shouldClearAuth) {
                 logger.info('Clearing old authentication data for fresh start', { senderId });
-                const fs = require('fs');
                 const path = require('path');
                 const authPath = path.join(process.env.SESSION_STORAGE_PATH || './sessions', senderId, 'auth');
                 
@@ -1313,9 +1507,38 @@ class SessionManager {
                 // Destroy existing socket only if it's not connecting
                 if (session.socket && session.socket.readyState !== 0) {
                     try {
-                        session.socket.end();
+                        // CRITICAL FIX: Safe socket cleanup in getQRStringForAPI
+                        const socketReadyState = session.socket.readyState;
+                        
+                        if (typeof socketReadyState !== 'undefined') {
+                            if (socketReadyState === 1) {
+                                // Socket is OPEN - safe to end
+                                logger.info('getQRStringForAPI: Socket is OPEN, calling end()', { senderId });
+                                session.socket.end();
+                            } else if (socketReadyState === 2 || socketReadyState === 3) {
+                                logger.info('getQRStringForAPI: Socket is CLOSING/CLOSED, no end() needed', {
+                                    senderId,
+                                    readyState: socketReadyState,
+                                    stateName: ['CONNECTING', 'OPEN', 'CLOSING', 'CLOSED'][socketReadyState] || 'UNKNOWN'
+                                });
+                            }
+                        } else {
+                            // Socket doesn't have readyState - check for internal state
+                            const hasInternalState = session.socket._socket || session.socket.readyState !== undefined;
+                            
+                            if (hasInternalState) {
+                                logger.info('getQRStringForAPI: Socket has internal state, attempting end()', { senderId });
+                                session.socket.end();
+                            } else {
+                                logger.info('getQRStringForAPI: Socket lacks internal state, skipping end() to prevent crash', { senderId });
+                            }
+                        }
                     } catch (e) {
                         // Ignore errors when ending socket
+                        logger.warn('Error during getQRStringForAPI socket cleanup', {
+                            senderId,
+                            error: e.message
+                        });
                     }
                     session.socket = null;
                     session.qrCodeData = null;
@@ -1372,7 +1595,7 @@ class SessionManager {
     }
 
     async getGroups(senderId) {
-        const session = this.sessions.get(senderId);
+        const session = await this.getSessionBySenderId(senderId);
         
         if (!session) {
             throw new Error(`Session not found for senderId ${senderId}`);
@@ -1386,7 +1609,7 @@ class SessionManager {
     }
 
     async getContacts(senderId) {
-        const session = this.sessions.get(senderId);
+        const session = await this.getSessionBySenderId(senderId);
         
         if (!session) {
             throw new Error(`Session not found for senderId ${senderId}`);
@@ -1570,6 +1793,154 @@ class SessionManager {
         } catch (error) {
             logger.error('Failed to get sessions by user ID', { userId, error: error.message });
             throw error;
+        }
+    }
+
+    // NEW: Start periodic session health monitor
+    startHealthMonitor() {
+        if (this.healthCheckInterval) {
+            clearInterval(this.healthCheckInterval);
+        }
+        
+        this.healthCheckInterval = setInterval(async () => {
+            if (!this.healthCheckEnabled || !this.isInitialized) {
+                return;
+            }
+            
+            try {
+                await this.performHealthCheck();
+            } catch (error) {
+                logger.error('Error in periodic health check', { error: error.message });
+            }
+        }, this.healthCheckIntervalTime);
+        
+        logger.info('Session health monitor started', { 
+            intervalMinutes: this.healthCheckIntervalTime / (60 * 1000) 
+        });
+    }
+
+    // NEW: Perform comprehensive health check on all sessions
+    async performHealthCheck() {
+        const sessionCount = this.sessions.size;
+        if (sessionCount === 0) {
+            return;
+        }
+        
+        logger.info(`Performing health check on ${sessionCount} sessions`);
+        
+        let healthyCount = 0;
+        let disconnectedCount = 0;
+        let restoredCount = 0;
+        let failedCount = 0;
+        
+        for (const [sessionId, session] of this.sessions) {
+            try {
+                // Skip sessions that are currently connecting or being destroyed
+                if (session.isConnecting || session.isDestroying || session.isRestoring) {
+                    continue;
+                }
+                
+                const isConnected = session.isSessionConnected();
+                
+                if (isConnected) {
+                    healthyCount++;
+                    continue;
+                }
+                
+                // Session is disconnected - check if auth files are valid
+                disconnectedCount++;
+                logger.info(`Health check: Session disconnected - ${sessionId.substring(0, 8)}...`);
+                
+                const authValidation = await session.validateAuthFiles();
+                
+                if (!authValidation.valid) {
+                    logger.warn(`Health check: Corrupted auth files detected - ${sessionId.substring(0, 8)}...`, {
+                        reason: authValidation.reason
+                    });
+                    
+                    // Check if backups are available
+                    const hasValidBackup = fs.existsSync(path.join(session.backupDir, 'latest')) ||
+                                         (fs.existsSync(session.backupDir) && 
+                                          fs.readdirSync(session.backupDir).some(dir => dir.startsWith('backup_')));
+                    
+                    if (hasValidBackup) {
+                        logger.info(`Health check: Attempting backup restoration - ${sessionId.substring(0, 8)}...`);
+                        
+                        const restored = await session.restoreSessionFromBackupSequential();
+                        if (restored) {
+                            restoredCount++;
+                            console.log(`🔄 Health Monitor: Session restored from backup - ${sessionId.substring(0, 8)}...`);
+                            
+                            // Attempt reconnection after restoration
+                            setTimeout(() => {
+                                if (!session.isConnecting && !session.isConnected) {
+                                    session.connect().catch(error => {
+                                        logger.error(`Health check: Reconnection after restore failed - ${sessionId.substring(0, 8)}...`, {
+                                            error: error.message
+                                        });
+                                    });
+                                }
+                            }, 3000);
+                        } else {
+                            failedCount++;
+                            logger.error(`Health check: Backup restoration failed - ${sessionId.substring(0, 8)}...`);
+                        }
+                    } else {
+                        failedCount++;
+                        logger.warn(`Health check: No backups available - ${sessionId.substring(0, 8)}...`);
+                    }
+                } else {
+                    // Auth files are valid but session is disconnected - try gentle reconnection
+                    logger.info(`Health check: Auth valid but disconnected, attempting reconnection - ${sessionId.substring(0, 8)}...`);
+                    
+                    setTimeout(() => {
+                        if (!session.isConnecting) {
+                            session.connect().catch(error => {
+                                logger.error(`Health check: Gentle reconnection failed - ${sessionId.substring(0, 8)}...`, {
+                                    error: error.message
+                                });
+                            });
+                        }
+                    }, Math.random() * 5000 + 2000); // Stagger reconnections
+                }
+                
+            } catch (sessionError) {
+                logger.error(`Health check error for session ${sessionId.substring(0, 8)}...`, {
+                    error: sessionError.message
+                });
+                failedCount++;
+            }
+        }
+        
+        if (disconnectedCount > 0 || restoredCount > 0 || failedCount > 0) {
+            logger.info('Health check completed', {
+                totalSessions: sessionCount,
+                healthy: healthyCount,
+                disconnected: disconnectedCount,
+                restored: restoredCount,
+                failed: failedCount
+            });
+        }
+    }
+
+    // NEW: Stop health monitor
+    stopHealthMonitor() {
+        if (this.healthCheckInterval) {
+            clearInterval(this.healthCheckInterval);
+            this.healthCheckInterval = null;
+            logger.info('Session health monitor stopped');
+        }
+    }
+
+    // NEW: Enable/disable health monitoring
+    setHealthMonitorEnabled(enabled) {
+        this.healthCheckEnabled = enabled;
+        logger.info(`Session health monitoring ${enabled ? 'enabled' : 'disabled'}`);
+        
+        if (enabled && !this.healthCheckInterval) {
+            this.startHealthMonitor();
+        } else if (!enabled && this.healthCheckInterval) {
+            this.stopHealthMonitor();
         }
     }
 }

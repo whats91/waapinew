@@ -53,6 +53,19 @@ class BaileysSession {
         this.maxStreamConflicts = 3; // Max conflicts before forced reset
         this.streamConflictCooldown = 30000; // 30 seconds cooldown between conflicts
         
+        // NEW: Backup and restore system
+        this.backupDir = path.join(this.sessionDir, 'backup'); // Backup directory
+        this.lastBackupTime = null; // Track last backup time
+        this.backupInterval = 5 * 60 * 1000; // Backup every 5 minutes when connected
+        this.isRestoring = false; // Flag to prevent recursive restore attempts
+        this.backupEnabled = true; // Flag to enable/disable backup system
+        this.maxBackupAge = 24 * 60 * 60 * 1000; // Maximum backup age (24 hours)
+        this.backupRetryCount = 0; // Track backup retry attempts
+        this.maxBackupRetries = 3; // Maximum backup retry attempts
+        
+        // NEW: Track consecutive logout attempts to detect invalid credentials
+        this.consecutiveLogoutAttempts = 0; // Track logout attempts for credential validation
+        
         this.ensureSessionDirectory();
     }
 
@@ -64,6 +77,883 @@ class BaileysSession {
         // Create auth subdirectory for all authentication files
         if (!fs.existsSync(this.authDir)) {
             fs.mkdirSync(this.authDir, { recursive: true });
+        }
+        // Create backup subdirectory for backup files
+        if (!fs.existsSync(this.backupDir)) {
+            fs.mkdirSync(this.backupDir, { recursive: true });
+        }
+    }
+
+    // NEW: Comprehensive backup system for session authentication files with integrity verification
+    async createSessionBackup() {
+        if (!this.backupEnabled || this.isRestoring) {
+            return false;
+        }
+
+        try {
+            logger.session(this.sessionId, 'Creating session backup with integrity verification (creds file only)');
+
+            // CRITICAL: Pre-backup integrity and stability checks
+            const integrityCheck = await this.performPreBackupIntegrityCheck();
+            if (!integrityCheck.passed) {
+                logger.warn('Pre-backup integrity check failed, skipping backup', { 
+                    sessionId: this.sessionId,
+                    reason: integrityCheck.reason,
+                    details: integrityCheck.details
+                });
+                return false;
+            }
+
+            logger.session(this.sessionId, 'Pre-backup integrity check passed', {
+                sessionStable: integrityCheck.details.sessionStable,
+                authValid: integrityCheck.details.authValid,
+                credentialsVerified: integrityCheck.details.credentialsVerified
+            });
+
+            // Check if auth directory exists and has files
+            if (!fs.existsSync(this.authDir)) {
+                logger.warn('Auth directory does not exist, skipping backup', { sessionId: this.sessionId });
+                return false;
+            }
+
+            const authFiles = fs.readdirSync(this.authDir);
+            
+            // OPTIMIZED: Only backup credential files (creds.json), ignore pre-key and sender-key files
+            const credentialFiles = authFiles.filter(file => 
+                file.includes('creds') && file.endsWith('.json')
+            );
+            
+            if (credentialFiles.length === 0) {
+                logger.warn('No credential files found, skipping backup', { 
+                    sessionId: this.sessionId,
+                    availableFiles: authFiles,
+                    note: 'Only creds.json files are backed up'
+                });
+                return false;
+            }
+
+            // Create timestamped backup directory
+            const backupTimestamp = new Date().toISOString().replace(/[:.]/g, '-');
+            const timestampedBackupDir = path.join(this.backupDir, `backup_${backupTimestamp}`);
+            
+            if (!fs.existsSync(timestampedBackupDir)) {
+                fs.mkdirSync(timestampedBackupDir, { recursive: true });
+            }
+
+            // Copy only credential files to backup directory with enhanced validation
+            let copiedFiles = 0;
+            let validatedFiles = 0;
+            for (const file of credentialFiles) {
+                const sourcePath = path.join(this.authDir, file);
+                const backupPath = path.join(timestampedBackupDir, file);
+                
+                try {
+                    // ENHANCED: Comprehensive file integrity validation
+                    const fileValidation = await this.validateCredentialFileIntegrity(sourcePath, file);
+                    if (!fileValidation.valid) {
+                        logger.warn('Skipping invalid credential file during backup', { 
+                            sessionId: this.sessionId, 
+                            file,
+                            reason: fileValidation.reason,
+                            details: fileValidation.details
+                        });
+                        continue;
+                    }
+
+                    validatedFiles++;
+                    logger.session(this.sessionId, `Credential file integrity validated: ${file}`, {
+                        hasNoiseKey: fileValidation.details.hasNoiseKey,
+                        hasPairingKey: fileValidation.details.hasPairingKey,
+                        hasSignedIdentityKey: fileValidation.details.hasSignedIdentityKey,
+                        hasRegistrationId: fileValidation.details.hasRegistrationId,
+                        fileSize: fileValidation.details.fileSize,
+                        integrityScore: fileValidation.details.integrityScore
+                    });
+
+                    // Copy credential file to backup
+                    fs.copyFileSync(sourcePath, backupPath);
+                    copiedFiles++;
+                    logger.session(this.sessionId, `Backed up validated credential file: ${file}`);
+                } catch (fileError) {
+                    logger.error('Error backing up credential file', { 
+                        sessionId: this.sessionId, 
+                        file, 
+                        error: fileError.message 
+                    });
+                }
+            }
+
+            if (copiedFiles > 0 && validatedFiles > 0) {
+                // Create a latest backup symlink/copy for easy access
+                const latestBackupDir = path.join(this.backupDir, 'latest');
+                if (fs.existsSync(latestBackupDir)) {
+                    fs.rmSync(latestBackupDir, { recursive: true, force: true });
+                }
+                
+                // Copy timestamped backup to latest
+                fs.mkdirSync(latestBackupDir, { recursive: true });
+                for (const file of fs.readdirSync(timestampedBackupDir)) {
+                    fs.copyFileSync(
+                        path.join(timestampedBackupDir, file),
+                        path.join(latestBackupDir, file)
+                    );
+                }
+
+                // Create enhanced backup metadata with integrity information
+                const backupMetadata = {
+                    timestamp: new Date().toISOString(),
+                    sessionId: this.sessionId,
+                    credentialFilesBackedUp: copiedFiles,
+                    credentialFilesValidated: validatedFiles,
+                    credentialFiles: credentialFiles,
+                    allAuthFiles: authFiles,
+                    sessionState: {
+                        isConnected: this.isConnected,
+                        hasUser: !!(this.socket && this.socket.user),
+                        socketState: this.socket?.readyState,
+                        isAuthenticating: this.isAuthenticating,
+                        lastActivity: this.lastActivity
+                    },
+                    integrityCheck: integrityCheck.details,
+                    backupType: 'credential_files_only_verified',
+                    note: 'Only validated credential files are backed up for optimal performance and reliability',
+                    createdBy: 'BaileysSession.createSessionBackup',
+                    backupVersion: '2.0' // Mark enhanced backup version
+                };
+
+                fs.writeFileSync(
+                    path.join(timestampedBackupDir, 'backup_metadata.json'),
+                    JSON.stringify(backupMetadata, null, 2)
+                );
+
+                fs.writeFileSync(
+                    path.join(latestBackupDir, 'backup_metadata.json'),
+                    JSON.stringify(backupMetadata, null, 2)
+                );
+
+                this.lastBackupTime = Date.now();
+                this.backupRetryCount = 0; // Reset retry count on success
+
+                logger.session(this.sessionId, 'Verified credential backup created successfully', {
+                    credentialFilesBackedUp: copiedFiles,
+                    credentialFilesValidated: validatedFiles,
+                    totalAuthFiles: authFiles.length,
+                    backupDir: timestampedBackupDir,
+                    timestamp: backupMetadata.timestamp,
+                    integrityVerified: true,
+                    note: 'Only validated credential files backed up (enhanced security)'
+                });
+
+                // Clean up old backups (keep last 5 backups)
+                this.cleanupOldBackups();
+
+                return true;
+            } else {
+                logger.warn('No valid credential files were backed up', { 
+                    sessionId: this.sessionId,
+                    availableFiles: authFiles,
+                    credentialFiles: credentialFiles,
+                    copiedFiles: copiedFiles,
+                    validatedFiles: validatedFiles,
+                    reason: 'All credential files failed validation'
+                });
+                
+                // Remove empty backup directory
+                if (fs.existsSync(timestampedBackupDir)) {
+                    fs.rmSync(timestampedBackupDir, { recursive: true, force: true });
+                }
+                
+                return false;
+            }
+
+        } catch (error) {
+            this.backupRetryCount++;
+            logger.error('Error creating verified credential backup', { 
+                sessionId: this.sessionId, 
+                error: error.message,
+                retryCount: this.backupRetryCount
+            });
+
+            // Disable backup temporarily if too many failures
+            if (this.backupRetryCount >= this.maxBackupRetries) {
+                logger.warn('Too many backup failures, temporarily disabling backup', { 
+                    sessionId: this.sessionId,
+                    retryCount: this.backupRetryCount 
+                });
+                setTimeout(() => {
+                    this.backupRetryCount = 0;
+                    logger.session(this.sessionId, 'Re-enabling backup system after cooldown');
+                }, 30000); // Re-enable after 30 seconds
+            }
+
+            return false;
+        }
+    }
+
+    // NEW: Comprehensive pre-backup integrity and stability verification
+    async performPreBackupIntegrityCheck() {
+        try {
+            const checks = {
+                sessionStable: false,
+                authValid: false,
+                credentialsVerified: false,
+                socketHealthy: false,
+                noActiveErrors: false
+            };
+
+            let reason = '';
+            let score = 0;
+
+            // 1. Session Stability Check
+            if (this.isConnected && this.socket && this.socket.user && !this.isConnecting && !this.isDestroying) {
+                // Check session has been stable for at least 30 seconds
+                const sessionStableDuration = Date.now() - this.lastActivity;
+                const minStableDuration = 30000; // 30 seconds
+                
+                if (sessionStableDuration >= minStableDuration || this.lastActivity === 0) {
+                    checks.sessionStable = true;
+                    score += 25;
+                } else {
+                    reason = `Session not stable enough (${Math.round(sessionStableDuration / 1000)}s < ${minStableDuration / 1000}s required)`;
+                }
+            } else {
+                reason = 'Session not connected or in transitional state';
+            }
+
+            // 2. Authentication State Validation
+            if (!this.isAuthenticating && !this.qrCodeScanned && !this.preventQRRegeneration) {
+                checks.authValid = true;
+                score += 20;
+            } else {
+                if (!reason) reason = 'Session in authentication/QR state - not stable for backup';
+            }
+
+            // 3. Socket Health Check
+            if (this.socket) {
+                const socketState = this.socket.readyState;
+                if (socketState === 1) { // OPEN and stable
+                    checks.socketHealthy = true;
+                    score += 20;
+                } else {
+                    if (!reason) reason = `Socket not in healthy state (readyState: ${socketState})`;
+                }
+            } else {
+                if (!reason) reason = 'No active socket connection';
+            }
+
+            // 4. Error State Check  
+            if (this.streamConflictCount === 0 && this.retryCount === 0) {
+                checks.noActiveErrors = true;
+                score += 15;
+            } else {
+                if (!reason) reason = `Active errors detected (conflicts: ${this.streamConflictCount}, retries: ${this.retryCount})`;
+            }
+
+            // 5. Credential File Validation
+            const authValidation = await this.validateAuthFiles();
+            if (authValidation.valid) {
+                checks.credentialsVerified = true;
+                score += 20;
+            } else {
+                if (!reason) reason = `Auth files invalid: ${authValidation.reason}`;
+            }
+
+            // Calculate overall integrity score
+            const integrityScore = score; // Out of 100
+            const minRequiredScore = 70; // Require at least 70% integrity
+            const passed = integrityScore >= minRequiredScore;
+
+            if (!passed && !reason) {
+                reason = `Integrity score too low: ${integrityScore}% (minimum: ${minRequiredScore}%)`;
+            }
+
+            return {
+                passed: passed,
+                reason: reason,
+                details: {
+                    ...checks,
+                    integrityScore: integrityScore,
+                    minRequiredScore: minRequiredScore,
+                    sessionStableDuration: this.lastActivity ? Date.now() - this.lastActivity : 0,
+                    socketState: this.socket?.readyState,
+                    streamConflicts: this.streamConflictCount,
+                    retryCount: this.retryCount
+                }
+            };
+
+        } catch (error) {
+            return {
+                passed: false,
+                reason: `Integrity check failed: ${error.message}`,
+                details: { error: error.message }
+            };
+        }
+    }
+
+    // NEW: Enhanced credential file integrity validation
+    async validateCredentialFileIntegrity(filePath, fileName) {
+        try {
+            // Check file exists and is readable
+            if (!fs.existsSync(filePath)) {
+                return {
+                    valid: false,
+                    reason: 'File does not exist',
+                    details: { fileName }
+                };
+            }
+
+            // Read file content
+            const fileContent = fs.readFileSync(filePath);
+            const fileSize = fileContent.length;
+
+            // Check for empty file
+            if (fileSize === 0) {
+                return {
+                    valid: false,
+                    reason: 'File is empty',
+                    details: { fileName, fileSize }
+                };
+            }
+
+            // Check minimum file size (creds.json should be substantial)
+            const minFileSize = 100; // Minimum 100 bytes for a valid creds file
+            if (fileSize < minFileSize) {
+                return {
+                    valid: false,
+                    reason: `File too small (${fileSize} bytes < ${minFileSize} required)`,
+                    details: { fileName, fileSize }
+                };
+            }
+
+            // Parse and validate JSON structure
+            let credData;
+            try {
+                credData = JSON.parse(fileContent.toString());
+            } catch (jsonError) {
+                return {
+                    valid: false,
+                    reason: `Invalid JSON: ${jsonError.message}`,
+                    details: { fileName, fileSize, jsonError: jsonError.message }
+                };
+            }
+
+            // Comprehensive Baileys credential validation
+            const validationChecks = {
+                hasNoiseKey: !!credData.noiseKey,
+                hasPairingKey: !!credData.pairingEphemeralKeyPair,
+                hasSignedIdentityKey: !!credData.signedIdentityKey,
+                hasRegistrationId: !!credData.registrationId,
+                hasIdentityKey: !!credData.identityKey,
+                hasPreKeys: !!credData.preKeys,
+                hasSignedPreKey: !!credData.signedPreKey
+            };
+
+            // Required fields for basic functionality
+            const requiredFields = ['noiseKey', 'pairingEphemeralKeyPair', 'signedIdentityKey', 'registrationId'];
+            const missingFields = requiredFields.filter(field => !credData[field]);
+
+            if (missingFields.length > 0) {
+                return {
+                    valid: false,
+                    reason: `Missing required fields: ${missingFields.join(', ')}`,
+                    details: { 
+                        fileName, 
+                        fileSize, 
+                        missingFields,
+                        ...validationChecks 
+                    }
+                };
+            }
+
+            // Validate key formats and lengths
+            try {
+                // Noise key should be a Buffer/Uint8Array representation
+                if (typeof credData.noiseKey !== 'object' || !credData.noiseKey.data) {
+                    return {
+                        valid: false,
+                        reason: 'Invalid noiseKey format',
+                        details: { fileName, noiseKeyType: typeof credData.noiseKey }
+                    };
+                }
+
+                // Registration ID should be a number
+                if (typeof credData.registrationId !== 'number' || credData.registrationId <= 0) {
+                    return {
+                        valid: false,
+                        reason: 'Invalid registrationId',
+                        details: { fileName, registrationId: credData.registrationId }
+                    };
+                }
+
+                // Validate key pair structure
+                if (!credData.pairingEphemeralKeyPair.private || !credData.pairingEphemeralKeyPair.public) {
+                    return {
+                        valid: false,
+                        reason: 'Invalid pairingEphemeralKeyPair structure',
+                        details: { fileName, keyPairKeys: Object.keys(credData.pairingEphemeralKeyPair) }
+                    };
+                }
+
+            } catch (keyValidationError) {
+                return {
+                    valid: false,
+                    reason: `Key validation failed: ${keyValidationError.message}`,
+                    details: { fileName, keyValidationError: keyValidationError.message }
+                };
+            }
+
+            // Calculate integrity score based on completeness
+            let integrityScore = 0;
+            const checkCount = Object.keys(validationChecks).length;
+            const passedChecks = Object.values(validationChecks).filter(Boolean).length;
+            integrityScore = Math.round((passedChecks / checkCount) * 100);
+
+            // File is valid if it has all required fields and reasonable integrity
+            const minIntegrityScore = 60; // Require at least 60% of checks to pass
+            const isValid = integrityScore >= minIntegrityScore;
+
+            return {
+                valid: isValid,
+                reason: isValid ? 'File validation passed' : `Integrity score too low: ${integrityScore}%`,
+                details: {
+                    fileName,
+                    fileSize,
+                    integrityScore,
+                    minIntegrityScore,
+                    passedChecks,
+                    totalChecks: checkCount,
+                    ...validationChecks
+                }
+            };
+
+        } catch (error) {
+            return {
+                valid: false,
+                reason: `Validation error: ${error.message}`,
+                details: { fileName, error: error.message }
+            };
+        }
+    }
+
+    // NEW: Enhanced backup restoration system with sequential fallback
+    async restoreSessionFromBackupSequential() {
+        if (this.isRestoring) {
+            logger.warn('Restore already in progress, skipping', { sessionId: this.sessionId });
+            return false;
+        }
+
+        this.isRestoring = true;
+
+        try {
+            logger.session(this.sessionId, 'Attempting sequential credential restoration from backups');
+
+            // Get all available backups sorted by date (newest first)
+            const backupDirs = [];
+            
+            // Add latest backup if it exists
+            const latestBackupDir = path.join(this.backupDir, 'latest');
+            if (fs.existsSync(latestBackupDir)) {
+                backupDirs.push({ path: latestBackupDir, name: 'latest' });
+            }
+
+            // Add timestamped backups
+            if (fs.existsSync(this.backupDir)) {
+                const timestampedBackups = fs.readdirSync(this.backupDir)
+                    .filter(dir => dir.startsWith('backup_') && dir !== 'latest')
+                    .map(dir => ({
+                        name: dir,
+                        path: path.join(this.backupDir, dir),
+                        timestamp: dir.replace('backup_', '').replace(/T(\d{2})-(\d{2})-(\d{2})-(\d{3})Z/, 'T$1:$2:$3.$4Z')
+                    }))
+                    .sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp)); // Newest first
+
+                backupDirs.push(...timestampedBackups);
+            }
+
+            if (backupDirs.length === 0) {
+                logger.warn('No backups found for sequential restoration', { sessionId: this.sessionId });
+                return false;
+            }
+
+            logger.session(this.sessionId, `Found ${backupDirs.length} backup(s) for sequential restoration`);
+
+            // Try each backup sequentially until one works
+            for (let i = 0; i < backupDirs.length; i++) {
+                const backup = backupDirs[i];
+                logger.session(this.sessionId, `Attempting restore from backup ${i + 1}/${backupDirs.length}: ${backup.name}`);
+
+                try {
+                    const restored = await this.restoreFromSpecificBackup(backup.path, backup.name);
+                    if (restored) {
+                        logger.session(this.sessionId, `Successfully restored from backup: ${backup.name}`);
+                        return true;
+                    } else {
+                        logger.warn(`Backup restoration failed: ${backup.name}`, { sessionId: this.sessionId });
+                    }
+                } catch (backupError) {
+                    logger.warn(`Error restoring from backup: ${backup.name}`, { 
+                        sessionId: this.sessionId, 
+                        error: backupError.message 
+                    });
+                }
+            }
+
+            logger.error('All backup restoration attempts failed', { 
+                sessionId: this.sessionId,
+                totalBackupsAttempted: backupDirs.length
+            });
+            return false;
+
+        } catch (error) {
+            logger.error('Error in sequential backup restoration', { 
+                sessionId: this.sessionId, 
+                error: error.message 
+            });
+            return false;
+        } finally {
+            this.isRestoring = false;
+        }
+    }
+
+    // NEW: Restore from a specific backup directory
+    async restoreFromSpecificBackup(backupDirPath, backupName) {
+        try {
+            // Verify backup metadata
+            const metadataPath = path.join(backupDirPath, 'backup_metadata.json');
+            if (fs.existsSync(metadataPath)) {
+                try {
+                    const metadata = JSON.parse(fs.readFileSync(metadataPath, 'utf8'));
+                    const backupAge = Date.now() - new Date(metadata.timestamp).getTime();
+                    
+                    if (backupAge > this.maxBackupAge) {
+                        logger.warn(`Backup too old: ${backupName}`, { 
+                            sessionId: this.sessionId,
+                            backupAge: Math.round(backupAge / (1000 * 60 * 60)) + ' hours'
+                        });
+                        return false;
+                    }
+
+                    logger.session(this.sessionId, `Backup metadata verified: ${backupName}`, {
+                        backupTimestamp: metadata.timestamp,
+                        credentialFilesBackedUp: metadata.credentialFilesBackedUp || metadata.filesBackedUp,
+                        backupAge: Math.round(backupAge / (1000 * 60)) + ' minutes'
+                    });
+                } catch (metadataError) {
+                    logger.warn(`Invalid backup metadata: ${backupName}, proceeding anyway`, { 
+                        sessionId: this.sessionId, 
+                        error: metadataError.message 
+                    });
+                }
+            }
+
+            // List backup files (only credential files)
+            const backupFiles = fs.readdirSync(backupDirPath).filter(file => 
+                !file.endsWith('_metadata.json') && file.includes('creds') && file.endsWith('.json')
+            );
+
+            if (backupFiles.length === 0) {
+                logger.warn(`No credential files in backup: ${backupName}`, { sessionId: this.sessionId });
+                return false;
+            }
+
+            // Create pre-restore backup of current files
+            if (fs.existsSync(this.authDir)) {
+                const currentFiles = fs.readdirSync(this.authDir);
+                if (currentFiles.length > 0) {
+                    const preRestoreBackupDir = path.join(this.backupDir, `pre_restore_${Date.now()}_${backupName}`);
+                    fs.mkdirSync(preRestoreBackupDir, { recursive: true });
+                    
+                    for (const file of currentFiles) {
+                        try {
+                            fs.copyFileSync(
+                                path.join(this.authDir, file),
+                                path.join(preRestoreBackupDir, file)
+                            );
+                        } catch (copyError) {
+                            logger.warn('Error backing up current file before restore', {
+                                sessionId: this.sessionId,
+                                file,
+                                error: copyError.message
+                            });
+                        }
+                    }
+                    logger.session(this.sessionId, `Current auth files backed up before restore: ${backupName}`);
+                }
+            }
+
+            // Ensure auth directory exists
+            if (!fs.existsSync(this.authDir)) {
+                fs.mkdirSync(this.authDir, { recursive: true });
+            }
+
+            // Restore credential files from backup
+            let restoredFiles = 0;
+            for (const file of backupFiles) {
+                const backupPath = path.join(backupDirPath, file);
+                const authPath = path.join(this.authDir, file);
+                
+                try {
+                    // Verify backup credential file before restoring
+                    const backupContent = fs.readFileSync(backupPath);
+                    if (backupContent.length === 0) {
+                        logger.warn(`Skipping empty backup credential file: ${file}`, { sessionId: this.sessionId });
+                        continue;
+                    }
+
+                    // Validate credential file structure
+                    try {
+                        const credData = JSON.parse(backupContent.toString());
+                        
+                        // Validate that this is a proper Baileys credential file
+                        if (!credData.noiseKey || !credData.pairingEphemeralKeyPair) {
+                            logger.warn(`Skipping invalid backup credential file: ${file}`, { 
+                                sessionId: this.sessionId, 
+                                hasNoiseKey: !!credData.noiseKey,
+                                hasPairingKey: !!credData.pairingEphemeralKeyPair
+                            });
+                            continue;
+                        }
+                        
+                        logger.session(this.sessionId, `Backup credential file validated: ${file}`, {
+                            hasNoiseKey: !!credData.noiseKey,
+                            hasPairingKey: !!credData.pairingEphemeralKeyPair,
+                            hasSignedIdentityKey: !!credData.signedIdentityKey,
+                            hasRegistrationId: !!credData.registrationId
+                        });
+                        
+                    } catch (jsonError) {
+                        logger.warn(`Skipping corrupted backup credential file: ${file}`, { 
+                            sessionId: this.sessionId, 
+                            error: jsonError.message 
+                        });
+                        continue;
+                    }
+
+                    // Restore credential file
+                    fs.copyFileSync(backupPath, authPath);
+                    restoredFiles++;
+                    logger.session(this.sessionId, `Restored credential file: ${file} from ${backupName}`);
+                } catch (fileError) {
+                    logger.error(`Error restoring credential file: ${file} from ${backupName}`, { 
+                        sessionId: this.sessionId, 
+                        error: fileError.message 
+                    });
+                }
+            }
+
+            if (restoredFiles > 0) {
+                logger.session(this.sessionId, `Credential files restored from ${backupName}`, {
+                    credentialFilesRestored: restoredFiles,
+                    totalBackupFiles: backupFiles.length,
+                    backupSource: backupName
+                });
+
+                // Reset authentication state and force re-initialization
+                this.authState = null;
+                this.saveCreds = null;
+                this.isInitialized = false;
+                this.clearAuthenticationState();
+
+                return true;
+            } else {
+                logger.warn(`No credential files were restored from ${backupName}`, { 
+                    sessionId: this.sessionId,
+                    availableBackupFiles: backupFiles
+                });
+                return false;
+            }
+
+        } catch (error) {
+            logger.error(`Error restoring from specific backup: ${backupName}`, { 
+                sessionId: this.sessionId, 
+                error: error.message 
+            });
+            return false;
+        }
+    }
+
+    // NEW: Enhanced authentication file validation
+    async validateAuthFiles() {
+        try {
+            if (!fs.existsSync(this.authDir)) {
+                return { valid: false, reason: 'Auth directory does not exist' };
+            }
+
+            const authFiles = fs.readdirSync(this.authDir);
+            const credentialFiles = authFiles.filter(file => 
+                file.includes('creds') && file.endsWith('.json')
+            );
+
+            if (credentialFiles.length === 0) {
+                return { valid: false, reason: 'No credential files found' };
+            }
+
+            // Validate primary credential file
+            for (const file of credentialFiles) {
+                const filePath = path.join(this.authDir, file);
+                try {
+                    const fileContent = fs.readFileSync(filePath);
+                    if (fileContent.length === 0) {
+                        return { valid: false, reason: `Credential file is empty: ${file}` };
+                    }
+
+                    const credData = JSON.parse(fileContent.toString());
+                    
+                    // Check for required Baileys credential fields
+                    if (!credData.noiseKey) {
+                        return { valid: false, reason: `Missing noiseKey in ${file}` };
+                    }
+                    if (!credData.pairingEphemeralKeyPair) {
+                        return { valid: false, reason: `Missing pairingEphemeralKeyPair in ${file}` };
+                    }
+                    if (!credData.signedIdentityKey) {
+                        return { valid: false, reason: `Missing signedIdentityKey in ${file}` };
+                    }
+                    if (!credData.registrationId) {
+                        return { valid: false, reason: `Missing registrationId in ${file}` };
+                    }
+
+                    // File is valid
+                    logger.session(this.sessionId, `Auth file validation passed: ${file}`);
+                    return { 
+                        valid: true, 
+                        file: file,
+                        hasNoiseKey: !!credData.noiseKey,
+                        hasPairingKey: !!credData.pairingEphemeralKeyPair,
+                        hasSignedIdentityKey: !!credData.signedIdentityKey,
+                        hasRegistrationId: !!credData.registrationId
+                    };
+
+                } catch (parseError) {
+                    return { valid: false, reason: `Corrupted credential file: ${file} - ${parseError.message}` };
+                }
+            }
+
+            return { valid: false, reason: 'No valid credential files found' };
+
+        } catch (error) {
+            return { valid: false, reason: `Auth validation error: ${error.message}` };
+        }
+    }
+
+    // NEW: Check if session needs backup or restore
+    async checkSessionHealth() {
+        try {
+            // Skip if backup is disabled or restoring
+            if (!this.backupEnabled || this.isRestoring) {
+                return;
+            }
+
+            const now = Date.now();
+
+            // ENHANCED: Check if session is connected, stable, and healthy before creating backup
+            if (this.isConnected && this.socket && this.socket.user) {
+                // Additional stability checks before backup
+                const isSessionStable = !this.isConnecting && 
+                                       !this.isDestroying && 
+                                       !this.isAuthenticating && 
+                                       this.socket.readyState === 1; // WebSocket OPEN state
+
+                if (isSessionStable) {
+                    // Create/update backup if needed and session is stable
+                    const shouldBackup = !this.lastBackupTime || 
+                                       (now - this.lastBackupTime) > this.backupInterval;
+
+                    if (shouldBackup) {
+                        logger.session(this.sessionId, 'Performing periodic backup check for stable session');
+                        await this.createSessionBackup();
+                    }
+                } else {
+                    logger.session(this.sessionId, 'Session connected but not stable enough for backup', {
+                        isConnecting: this.isConnecting,
+                        isDestroying: this.isDestroying,
+                        isAuthenticating: this.isAuthenticating,
+                        socketState: this.socket?.readyState
+                    });
+                }
+            } else {
+                // ENHANCED: Session is not connected - comprehensive health check
+                logger.session(this.sessionId, 'Session health check: disconnected state detected');
+
+                // Validate current auth files
+                const authValidation = await this.validateAuthFiles();
+                
+                if (!authValidation.valid) {
+                    logger.session(this.sessionId, `Auth files invalid: ${authValidation.reason}`);
+                    
+                    // Check if we have valid backups available
+                    const hasValidBackup = fs.existsSync(path.join(this.backupDir, 'latest')) ||
+                                         (fs.existsSync(this.backupDir) && 
+                                          fs.readdirSync(this.backupDir).some(dir => dir.startsWith('backup_')));
+
+                    if (hasValidBackup && !this.isConnecting) {
+                        logger.session(this.sessionId, 'Invalid auth files detected, attempting sequential backup restoration');
+                        const restored = await this.restoreSessionFromBackupSequential();
+                        
+                        if (restored) {
+                            console.log(`🔄 Credential files restored from backup for ${this.sessionId.substring(0, 8)}...`);
+                            logger.session(this.sessionId, 'Session successfully restored from backup');
+                            
+                            // Attempt to reconnect after successful restore
+                            setTimeout(() => {
+                                if (!this.isConnecting && !this.isConnected) {
+                                    logger.session(this.sessionId, 'Attempting reconnection after backup restoration');
+                                    this.connect().catch(error => {
+                                        logger.error('Reconnection after restore failed', {
+                                            sessionId: this.sessionId,
+                                            error: error.message
+                                        });
+                                        
+                                        // If connection fails, try one more time after delay
+                                        setTimeout(() => {
+                                            logger.session(this.sessionId, 'Final reconnection attempt after restore');
+                                            this.connect().catch(finalError => {
+                                                logger.error('Final reconnection after restore failed', {
+                                                    sessionId: this.sessionId,
+                                                    error: finalError.message
+                                                });
+                                            });
+                                        }, 5000);
+                                    });
+                                }
+                            }, 2000);
+                        } else {
+                            logger.error('Failed to restore session from any available backup', { 
+                                sessionId: this.sessionId,
+                                reason: authValidation.reason
+                            });
+                        }
+                    } else if (!hasValidBackup) {
+                        logger.warn('No backups available for restoration', { 
+                            sessionId: this.sessionId,
+                            reason: authValidation.reason
+                        });
+                    }
+                } else {
+                    logger.session(this.sessionId, 'Auth files are valid but session disconnected');
+                    
+                    // If auth files are valid but session is disconnected, try gentle reconnection
+                    if (!this.isConnecting) {
+                        logger.session(this.sessionId, 'Attempting gentle reconnection with valid auth files');
+                        setTimeout(() => {
+                            if (!this.isConnecting && !this.isConnected) {
+                                this.connect().catch(error => {
+                                    logger.error('Gentle reconnection failed', {
+                                        sessionId: this.sessionId,
+                                        error: error.message
+                                    });
+                                });
+                            }
+                        }, 3000);
+                    }
+                }
+            }
+
+        } catch (error) {
+            logger.error('Error in enhanced session health check', { 
+                sessionId: this.sessionId, 
+                error: error.message 
+            });
         }
     }
 
@@ -83,6 +973,25 @@ class BaileysSession {
         try {
             logger.session(this.sessionId, 'Initializing Baileys session (lazy mode)');
             
+            // NEW: Check if auth files exist, if not try to restore from backup
+            if (!fs.existsSync(this.authDir) || fs.readdirSync(this.authDir).length === 0) {
+                logger.session(this.sessionId, 'No auth files found, checking for backup');
+                
+                const hasBackup = fs.existsSync(path.join(this.backupDir, 'latest')) &&
+                                fs.readdirSync(path.join(this.backupDir, 'latest')).length > 0;
+                
+                if (hasBackup) {
+                    logger.session(this.sessionId, 'Backup found, attempting restore before initialization');
+                    const restored = await this.restoreSessionFromBackupSequential();
+                    if (restored) {
+                        console.log(`🔄 Credential files restored from backup for ${this.sessionId.substring(0, 8)}...`);
+                        logger.session(this.sessionId, 'Session successfully restored from backup');
+                    } else {
+                        logger.warn('Failed to restore session from backup', { sessionId: this.sessionId });
+                    }
+                }
+            }
+            
             // Load authentication state from auth subdirectory
             const { state, saveCreds } = await useMultiFileAuthState(this.authDir);
             this.authState = state;
@@ -93,6 +1002,30 @@ class BaileysSession {
             return true;
         } catch (error) {
             logger.error('Failed to initialize Baileys session (lazy mode)', { sessionId: this.sessionId, error: error.message });
+            
+            // NEW: If initialization fails, try to restore from backup as last resort
+            if (!this.isRestoring) {
+                logger.session(this.sessionId, 'Initialization failed, attempting backup restore as last resort');
+                try {
+                    const restored = await this.restoreSessionFromBackupSequential();
+                    if (restored) {
+                        logger.session(this.sessionId, 'Backup restore successful, retrying initialization');
+                        // Retry initialization after successful restore
+                        const { state, saveCreds } = await useMultiFileAuthState(this.authDir);
+                        this.authState = state;
+                        this.saveCreds = saveCreds;
+                        this.isInitialized = true;
+                        logger.session(this.sessionId, 'Session initialized successfully after backup restore');
+                        return true;
+                    }
+                } catch (restoreError) {
+                    logger.error('Backup restore also failed', { 
+                        sessionId: this.sessionId, 
+                        restoreError: restoreError.message 
+                    });
+                }
+            }
+            
             throw error;
         }
     }
@@ -160,27 +1093,112 @@ class BaileysSession {
                 });
                 
                 try {
-                    // Clear all event listeners first
+                    // Clear all event listeners first to prevent race conditions
                     if (this.socket.ev) {
                         this.socket.ev.removeAllListeners();
                     }
                     
-                    // Properly close socket
-                    if (this.socket.readyState === 1) { // OPEN
-                        this.socket.close();
+                    // CRITICAL FIX: Enhanced socket state checking and error handling
+                    const socketReadyState = this.socket.readyState;
+                    logger.session(this.sessionId, 'Socket cleanup - current state', {
+                        readyState: socketReadyState,
+                        stateNames: ['CONNECTING', 'OPEN', 'CLOSING', 'CLOSED'],
+                        currentStateName: ['CONNECTING', 'OPEN', 'CLOSING', 'CLOSED'][socketReadyState] || 'UNKNOWN'
+                    });
+                    
+                    // Only attempt to close if socket is in a closeable state
+                    if (typeof socketReadyState !== 'undefined') {
+                        // WebSocket readyState: 0=CONNECTING, 1=OPEN, 2=CLOSING, 3=CLOSED
+                        if (socketReadyState === 0 || socketReadyState === 1) {
+                            // Socket is CONNECTING or OPEN - safe to close
+                            try {
+                                logger.session(this.sessionId, 'Closing socket via close() method', { readyState: socketReadyState });
+                                this.socket.close();
+                            } catch (closeError) {
+                                logger.warn('Error during socket.close()', { 
+                                    sessionId: this.sessionId, 
+                                    error: closeError.message,
+                                    readyState: socketReadyState
+                                });
+                                // Try alternative cleanup method
+                                try {
+                                    logger.session(this.sessionId, 'Attempting socket.end() as fallback');
+                                    this.socket.end();
+                                } catch (endError) {
+                                    logger.warn('Error during socket.end() fallback', { 
+                                        sessionId: this.sessionId, 
+                                        error: endError.message 
+                                    });
+                                }
+                            }
+                        } else if (socketReadyState === 2) {
+                            // Socket is CLOSING - wait for it to close naturally
+                            logger.session(this.sessionId, 'Socket already closing, waiting for completion');
+                            let waitCount = 0;
+                            while (this.socket.readyState === 2 && waitCount < 10) { // Max 1 second wait
+                                await new Promise(resolve => setTimeout(resolve, 100));
+                                waitCount++;
+                            }
+                            logger.session(this.sessionId, 'Socket close wait completed', { 
+                                finalReadyState: this.socket.readyState,
+                                waitTime: waitCount * 100 + 'ms'
+                            });
+                        } else if (socketReadyState === 3) {
+                            // Socket is already CLOSED - no action needed
+                            logger.session(this.sessionId, 'Socket already closed, no cleanup needed');
+                        }
                     } else {
-                        this.socket.end();
+                        // Socket doesn't have readyState - try gentle cleanup
+                        logger.session(this.sessionId, 'Socket without readyState, attempting gentle cleanup');
+                        try {
+                            // CRITICAL FIX: Enhanced gentle cleanup with state checking in _performConnection
+                            if (this.socket && typeof this.socket.end === 'function') {
+                                // Check if socket has internal state that would indicate it's safe to end
+                                const hasInternalState = this.socket._socket || this.socket.readyState !== undefined;
+                                
+                                if (hasInternalState) {
+                                    logger.session(this.sessionId, 'Socket has internal state, attempting end()');
+                                    this.socket.end();
+                                } else {
+                                    logger.session(this.sessionId, 'Socket lacks internal state, skipping end() to prevent crash');
+                                }
+                            } else if (this.socket && typeof this.socket.close === 'function') {
+                                // Try close as alternative
+                                const hasInternalState = this.socket._socket || this.socket.readyState !== undefined;
+                                
+                                if (hasInternalState) {
+                                    logger.session(this.sessionId, 'Socket has internal state, attempting close()');
+                                    this.socket.close();
+                                } else {
+                                    logger.session(this.sessionId, 'Socket lacks internal state, skipping close() to prevent crash');
+                                }
+                            } else {
+                                logger.session(this.sessionId, 'Socket lacks cleanup methods, skipping');
+                            }
+                        } catch (gentleCleanupError) {
+                            logger.warn('Error during gentle socket cleanup', { 
+                                sessionId: this.sessionId, 
+                                error: gentleCleanupError.message,
+                                errorType: gentleCleanupError.constructor.name
+                            });
+                        }
                     }
                     
-                    // Add delay to ensure cleanup
+                    // Add delay to ensure cleanup completion
                     await new Promise(resolve => setTimeout(resolve, 500));
-                } catch (e) {
-                    logger.warn('Error cleaning up existing socket', { 
+                    
+                } catch (cleanupError) {
+                    // Comprehensive error logging but don't let it crash the process
+                    logger.error('Socket cleanup failed - continuing with new socket creation', { 
                         sessionId: this.sessionId, 
-                        error: e.message 
+                        error: cleanupError.message,
+                        errorType: cleanupError.constructor.name,
+                        socketExists: !!this.socket,
+                        socketReadyState: this.socket?.readyState
                     });
                 }
                 
+                // Always clear the socket reference regardless of cleanup success
                 this.socket = null;
             }
 
@@ -328,9 +1346,59 @@ class BaileysSession {
                                     // Try to restart the socket completely
                                     if (this.socket) {
                                         try {
-                                            this.socket.end();
-                                        } catch (e) {
-                                            // Ignore errors
+                                            // CRITICAL FIX: Safe socket cleanup in auth timeout
+                                            const socketReadyState = this.socket.readyState;
+                                            logger.session(this.sessionId, 'Auth timeout socket cleanup', {
+                                                readyState: socketReadyState,
+                                                stateNames: ['CONNECTING', 'OPEN', 'CLOSING', 'CLOSED'],
+                                                currentStateName: ['CONNECTING', 'OPEN', 'CLOSING', 'CLOSED'][socketReadyState] || 'UNKNOWN'
+                                            });
+                                            
+                                            if (typeof socketReadyState !== 'undefined') {
+                                                if (socketReadyState === 0 || socketReadyState === 1) {
+                                                    // Socket is CONNECTING or OPEN - safe to close
+                                                    this.socket.close();
+                                                } else if (socketReadyState === 2) {
+                                                    // Socket is CLOSING - wait briefly
+                                                    logger.session(this.sessionId, 'Auth timeout: socket already closing');
+                                                } else if (socketReadyState === 3) {
+                                                    // Socket is already CLOSED
+                                                    logger.session(this.sessionId, 'Auth timeout: socket already closed');
+                                                }
+                                            } else {
+                                                // Socket without readyState - try gentle cleanup
+                                                // CRITICAL FIX: Enhanced gentle cleanup with state checking in auth timeout
+                                                if (this.socket && typeof this.socket.end === 'function') {
+                                                    // Check if socket has internal state that would indicate it's safe to end
+                                                    const hasInternalState = this.socket._socket || this.socket.readyState !== undefined;
+                                                    
+                                                    if (hasInternalState) {
+                                                        logger.session(this.sessionId, 'Auth timeout: Socket has internal state, attempting end()');
+                                                        this.socket.end();
+                                                    } else {
+                                                        logger.session(this.sessionId, 'Auth timeout: Socket lacks internal state, skipping end() to prevent crash');
+                                                    }
+                                                } else if (this.socket && typeof this.socket.close === 'function') {
+                                                    // Try close as alternative
+                                                    const hasInternalState = this.socket._socket || this.socket.readyState !== undefined;
+                                                    
+                                                    if (hasInternalState) {
+                                                        logger.session(this.sessionId, 'Auth timeout: Socket has internal state, attempting close()');
+                                                        this.socket.close();
+                                                    } else {
+                                                        logger.session(this.sessionId, 'Auth timeout: Socket lacks internal state, skipping close() to prevent crash');
+                                                    }
+                                                } else {
+                                                    logger.session(this.sessionId, 'Auth timeout: Socket lacks cleanup methods, skipping');
+                                                }
+                                            }
+                                        } catch (authTimeoutError) {
+                                            logger.warn('Error during auth timeout socket cleanup', {
+                                                sessionId: this.sessionId,
+                                                error: authTimeoutError.message,
+                                                socketExists: !!this.socket,
+                                                socketReadyState: this.socket?.readyState
+                                            });
                                         }
                                         this.socket = null;
                                     }
@@ -412,9 +1480,160 @@ class BaileysSession {
 
                     // Enhanced disconnect handling with authentication state preservation
                     if (statusCode === DisconnectReason.loggedOut) {
-                        logger.session(this.sessionId, 'Session logged out, will not reconnect');
+                        logger.session(this.sessionId, 'Session logged out - analyzing reason and attempting recovery');
+                        
+                        // CRITICAL FIX: Track consecutive logout attempts to detect invalid credentials
+                        if (!this.consecutiveLogoutAttempts) {
+                            this.consecutiveLogoutAttempts = 0;
+                        }
+                        this.consecutiveLogoutAttempts++;
+                        
+                        logger.session(this.sessionId, `Logout attempt ${this.consecutiveLogoutAttempts}`, {
+                            totalAttempts: this.consecutiveLogoutAttempts,
+                            lastActivity: this.lastActivity,
+                            socketState: this.socket?.readyState
+                        });
+                        
+                        // ENHANCED: If we have multiple consecutive logout attempts, credentials are likely invalid
+                        if (this.consecutiveLogoutAttempts >= 3) {
+                            logger.session(this.sessionId, 'Multiple consecutive logout attempts detected - credentials likely invalid on WhatsApp servers');
+                            
+                            // Force complete session reset - clear all auth data
+                            try {
+                                // Clear local auth files
+                                if (fs.existsSync(this.authDir)) {
+                                    const authFiles = fs.readdirSync(this.authDir);
+                                    for (const file of authFiles) {
+                                        try {
+                                            fs.unlinkSync(path.join(this.authDir, file));
+                                            logger.session(this.sessionId, `Cleared invalid auth file: ${file}`);
+                                        } catch (unlinkError) {
+                                            logger.warn('Error clearing auth file', {
+                                                sessionId: this.sessionId,
+                                                file,
+                                                error: unlinkError.message
+                                            });
+                                        }
+                                    }
+                                }
+                                
+                                // Reset authentication state
+                                this.authState = null;
+                                this.saveCreds = null;
+                                this.isInitialized = false;
+                                this.clearAuthenticationState();
+                                this.consecutiveLogoutAttempts = 0;
+                                this.retryCount = 0;
+                                
+                                // Update status to require fresh QR scan
+                                await this.updateSessionStatus('requires_qr').catch(() => {});
+                                
+                                console.log(`🔄 Session ${this.sessionId.substring(0, 8)}... reset - QR scan required`);
+                                logger.session(this.sessionId, 'Session completely reset due to invalid credentials - requires fresh QR scan');
+                                
+                                return; // Don't attempt any more restoration
+                                
+                            } catch (resetError) {
+                                logger.error('Error during forced session reset', {
+                                    sessionId: this.sessionId,
+                                    error: resetError.message
+                                });
+                            }
+                        }
+                        
+                        // CRITICAL FIX: Try backup restoration but with validation
+                        try {
+                            // First validate current auth files
+                            const authValidation = await this.validateAuthFiles();
+                            
+                            if (!authValidation.valid) {
+                                logger.session(this.sessionId, `Auth files corrupted after logout: ${authValidation.reason}`);
+                                
+                                // Check if we have backups available
+                                const hasValidBackup = fs.existsSync(path.join(this.backupDir, 'latest')) ||
+                                                     (fs.existsSync(this.backupDir) && 
+                                                      fs.readdirSync(this.backupDir).some(dir => dir.startsWith('backup_')));
+
+                                if (hasValidBackup) {
+                                    logger.session(this.sessionId, 'Attempting backup restoration after logout');
+                                    const restored = await this.restoreSessionFromBackupSequential();
+                                    
+                                    if (restored) {
+                                        console.log(`🔄 Session restored from backup after logout: ${this.sessionId.substring(0, 8)}...`);
+                                        logger.session(this.sessionId, 'Backup restoration successful - attempting reconnection');
+                                        
+                                        // Reset consecutive attempts counter on successful restore
+                                        this.consecutiveLogoutAttempts = 0;
+                                        this.retryCount = 0;
+                                        
+                                        // Wait before attempting reconnection to avoid immediate 401
+                                        setTimeout(() => {
+                                            if (!this.isConnecting) {
+                                                this.connect().catch(error => {
+                                                    logger.error('Reconnection after backup restoration failed', {
+                                                        sessionId: this.sessionId,
+                                                        error: error.message
+                                                    });
+                                                    
+                                                    // If reconnection fails immediately with 401, mark credentials as invalid
+                                                    if (error.message.includes('401') || error.message.includes('loggedOut')) {
+                                                        this.consecutiveLogoutAttempts++;
+                                                        logger.session(this.sessionId, 'Immediate 401 after restore - backup may contain invalid credentials');
+                                                    }
+                                                });
+                                            }
+                                        }, 5000); // Wait 5 seconds before reconnecting
+                                        
+                                        return; // Don't proceed to logged_out status
+                                    } else {
+                                        logger.error('Backup restoration failed after logout', { 
+                                            sessionId: this.sessionId 
+                                        });
+                                    }
+                                } else {
+                                    logger.warn('No backups available for restoration after logout', { 
+                                        sessionId: this.sessionId 
+                                    });
+                                }
+                            } else {
+                                logger.session(this.sessionId, 'Auth files appear valid despite logout - testing with limited reconnection');
+                                
+                                // ENHANCED: Limited reconnection attempts for apparently valid auth files
+                                if (this.consecutiveLogoutAttempts <= 2) {
+                                    this.retryCount = 0;
+                                    
+                                    // Wait longer before retry to avoid hitting rate limits
+                                    const retryDelay = Math.min(3000 * this.consecutiveLogoutAttempts, 10000);
+                                    
+                                    setTimeout(() => {
+                                        if (!this.isConnecting) {
+                                            logger.session(this.sessionId, `Testing reconnection attempt ${this.consecutiveLogoutAttempts} with ${retryDelay}ms delay`);
+                                            this.connect().catch(error => {
+                                                logger.error('Test reconnection after logout failed', {
+                                                    sessionId: this.sessionId,
+                                                    error: error.message,
+                                                    attempt: this.consecutiveLogoutAttempts
+                                                });
+                                            });
+                                        }
+                                    }, retryDelay);
+                                    
+                                    return; // Don't proceed to logged_out immediately
+                                } else {
+                                    logger.session(this.sessionId, 'Multiple reconnection attempts failed - auth files likely invalid despite appearing valid');
+                                }
+                            }
+                            
+                        } catch (restoreError) {
+                            logger.error('Error during backup restoration attempt after logout', {
+                                sessionId: this.sessionId,
+                                error: restoreError.message
+                            });
+                        }
+                        
+                        // Mark as logged out only after all attempts fail
+                        logger.session(this.sessionId, 'All recovery attempts exhausted - marking as logged out');
                         await this.updateSessionStatus('logged_out').catch(() => {});
-                        // Clear authentication state on logout
                         this.clearAuthenticationState();
                     } else if (statusCode === DisconnectReason.restartRequired) {
                         logger.session(this.sessionId, 'WhatsApp restart required, attempting reconnection');
@@ -520,9 +1739,38 @@ class BaileysSession {
                             if (this.socket) {
                                 try {
                                     this.socket.ev.removeAllListeners();
-                                    this.socket.end();
+                                    
+                                    // CRITICAL FIX: Safe socket cleanup in stream conflict handling
+                                    const socketReadyState = this.socket.readyState;
+                                    
+                                    if (typeof socketReadyState !== 'undefined') {
+                                        if (socketReadyState === 0 || socketReadyState === 1) {
+                                            // Socket is CONNECTING or OPEN - safe to end
+                                            logger.session(this.sessionId, 'Stream conflict: Socket in safe state, calling end()');
+                                            this.socket.end();
+                                        } else {
+                                            logger.session(this.sessionId, 'Stream conflict: Socket not in safe state, skipping end()', {
+                                                readyState: socketReadyState,
+                                                stateName: ['CONNECTING', 'OPEN', 'CLOSING', 'CLOSED'][socketReadyState] || 'UNKNOWN'
+                                            });
+                                        }
+                                    } else {
+                                        // Socket doesn't have readyState - check for internal state
+                                        const hasInternalState = this.socket._socket || this.socket.readyState !== undefined;
+                                        
+                                        if (hasInternalState) {
+                                            logger.session(this.sessionId, 'Stream conflict: Socket has internal state, attempting end()');
+                                            this.socket.end();
+                                        } else {
+                                            logger.session(this.sessionId, 'Stream conflict: Socket lacks internal state, skipping end() to prevent crash');
+                                        }
+                                    }
                                 } catch (e) {
                                     // Ignore errors
+                                    logger.warn('Error during stream conflict socket cleanup', {
+                                        sessionId: this.sessionId,
+                                        error: e.message
+                                    });
                                 }
                                 this.socket = null;
                             }
@@ -607,6 +1855,9 @@ class BaileysSession {
                     this.qrCodeString = null; // Clear QR string when connected
                     this.qrCodeTimestamp = null; // Clear QR timestamp when connected
                     
+                    // CRITICAL: Reset consecutive logout attempts on successful connection
+                    this.consecutiveLogoutAttempts = 0;
+                    
                     console.log('\n' + '🎉'.repeat(20));
                     console.log('✅ WHATSAPP SESSION CONNECTED SUCCESSFULLY!');
                     console.log(`📱 Session ID: ${this.sessionId.substring(0, 8)}...`);
@@ -618,6 +1869,22 @@ class BaileysSession {
                     await this.updateSessionStatus('connected').catch(err => {
                         logger.error('Error updating session status to connected', { sessionId: this.sessionId, error: err.message });
                     });
+
+                    // NEW: Create initial backup on successful connection
+                    setTimeout(async () => {
+                        try {
+                            logger.session(this.sessionId, 'Creating initial backup after successful connection');
+                            const backupCreated = await this.createSessionBackup();
+                            if (backupCreated) {
+                                console.log(`💾 Credential backup created for ${this.sessionId.substring(0, 8)}...`);
+                            }
+                        } catch (backupError) {
+                            logger.error('Error creating initial backup', { 
+                                sessionId: this.sessionId, 
+                                error: backupError.message 
+                            });
+                        }
+                    }, 5000); // Wait 5 seconds after connection to ensure stability
                 } else if (connection === 'connecting') {
                     console.log(`\n🔄 Connecting to WhatsApp... (Session: ${this.sessionId.substring(0, 8)}...)\n`);
                     logger.session(this.sessionId, 'Connecting to WhatsApp...');
@@ -675,174 +1942,42 @@ class BaileysSession {
             try {
                 const { messages, type } = messageInfo;
                 
-                console.log('\n🔍 RAW MESSAGE UPSERT EVENT RECEIVED');
-                console.log('════════════════════════════════════════════════════════════════════');
-                console.log('Session ID:', this.sessionId);
-                console.log('📊 SESSION STATUS CHECK:');
-                console.log('  Socket exists:', !!this.socket);
-                console.log('  Socket user exists:', !!this.socket?.user);
-                console.log('  Socket readyState:', this.socket?.readyState);
-                console.log('  isConnected flag:', this.isConnected);
-                console.log('  Session connected:', this.isSessionConnected());
-                console.log('  Auth state exists:', !!this.authState);
-                console.log('  Has credentials:', !!(this.authState?.creds));
-                
-                // Check what type of WhatsApp this is
-                if (this.socket?.user) {
-                    console.log('👤 CONNECTED USER INFO:');
-                    console.log('  User ID:', this.socket.user.id);
-                    console.log('  User Name:', this.socket.user.name);
-                    console.log('  Is Business:', this.socket.user.businessProfile ? 'YES' : 'NO');
-                    if (this.socket.user.businessProfile) {
-                        console.log('  Business Name:', this.socket.user.businessProfile.businessName);
-                        console.log('  Business Category:', this.socket.user.businessProfile.category);
-                    }
-                }
-                
-                console.log('Message Info Type:', type);
-                console.log('Messages Array Length:', Array.isArray(messages) ? messages.length : 'Not an array');
-                console.log('Timestamp:', new Date().toISOString());
-                
                 if (type === 'notify' && Array.isArray(messages)) {
-                    console.log(`📬 Processing ${messages.length} message(s) of type: ${type}`);
-                    
                     for (let i = 0; i < messages.length; i++) {
                         const message = messages[i];
-                        console.log(`\n───── MESSAGE ${i + 1}/${messages.length} ─────`);
                         
                         try {
-                            // Detailed logging BEFORE filtering
-                            console.log('📋 MESSAGE STRUCTURE ANALYSIS:');
-                            console.log('  Has message object:', !!message);
-                            console.log('  Has message.key:', !!message?.key);
-                            console.log('  Message keys:', message ? Object.keys(message) : 'null');
-                            
+                            // Keep all the filtering logic but remove debug logging
                             if (message?.key) {
-                                console.log('🔑 MESSAGE KEY ANALYSIS:');
-                                console.log('  Key object:', JSON.stringify(message.key, null, 2));
-                                console.log('  From Me:', message.key.fromMe);
-                                console.log('  Remote JID:', message.key.remoteJid);
-                                console.log('  Message ID:', message.key.id);
-                                console.log('  Participant:', message.key.participant);
-                                
-                                // Test each filtering condition individually
-                                console.log('🚦 FILTERING CONDITIONS ANALYSIS:');
                                 const hasMessage = !!message;
                                 const hasKey = !!message.key;
-                                const notFromMe = !message.key.fromMe;
                                 const notBroadcast = !isJidBroadcast(message.key.remoteJid);
                                 const notStatusBroadcast = !isJidStatusBroadcast(message.key.remoteJid);
                                 const notNewsletter = !isJidNewsletter(message.key.remoteJid);
+                                const notGroup = !message.key.remoteJid?.endsWith('@g.us'); // Exclude group messages
                                 
-                                console.log('  ✓ Has message:', hasMessage);
-                                console.log('  ✓ Has key:', hasKey);
-                                console.log('  ✓ Not from me:', notFromMe);
-                                console.log('  ✓ Not broadcast (isJidBroadcast):', notBroadcast);
-                                console.log('  ✓ Not status broadcast (isJidStatusBroadcast):', notStatusBroadcast);
-                                console.log('  ✓ Not newsletter (isJidNewsletter):', notNewsletter);
+                                const shouldProcess = hasMessage && hasKey && notBroadcast && notStatusBroadcast && notNewsletter && notGroup;
                                 
-                                const shouldProcess = hasMessage && hasKey && notBroadcast && notStatusBroadcast && notNewsletter;
-                                console.log('  🎯 SHOULD PROCESS MESSAGE:', shouldProcess);
-                                
-                                if (!shouldProcess) {
-                                    console.log('  ❌ MESSAGE FILTERED OUT - REASON:');
-                                    if (!hasMessage) console.log('    - Missing message object');
-                                    if (!hasKey) console.log('    - Missing message key');
-                                    if (!notBroadcast) console.log('    - Message is a broadcast (isJidBroadcast returned true)');
-                                    if (!notStatusBroadcast) console.log('    - Message is a status broadcast (isJidStatusBroadcast returned true)');
-                                    if (!notNewsletter) console.log('    - Message is a newsletter (isJidNewsletter returned true)');
-                                    
-                                    // Additional debugging for JID functions
-                                    console.log('  🔍 JID FUNCTION DEBUGGING:');
-                                    console.log('    - Remote JID:', message.key.remoteJid);
-                                    console.log('    - isJidBroadcast result:', isJidBroadcast(message.key.remoteJid));
-                                    console.log('    - isJidStatusBroadcast result:', isJidStatusBroadcast(message.key.remoteJid));
-                                    console.log('    - isJidNewsletter result:', isJidNewsletter(message.key.remoteJid));
-                                    
-                                    // Check JID patterns
-                                    const jid = message.key.remoteJid;
-                                    console.log('    - JID ends with @s.whatsapp.net:', jid?.endsWith('@s.whatsapp.net'));
-                                    console.log('    - JID ends with @g.us:', jid?.endsWith('@g.us'));
-                                    console.log('    - JID ends with @broadcast:', jid?.endsWith('@broadcast'));
-                                    console.log('    - JID contains "status":', jid?.includes('status'));
-                                    console.log('    - JID contains "newsletter":', jid?.includes('newsletter'));
+                                if (shouldProcess) {
+                                    await this.handleIncomingMessage(message);
                                 }
-                            } else {
-                                console.log('  ❌ No message key found');
-                            }
-                            
-                            // TEMPORARILY MODIFIED FILTERING - ALLOW ALL MESSAGES FOR DEBUGGING
-                            // Original condition was: if (message && message.key && !message.key.fromMe && !isJidBroadcast(message.key.remoteJid) && !isJidStatusBroadcast(message.key.remoteJid) && !isJidNewsletter(message.key.remoteJid))
-                            
-                            // NEW TEMPORARY CONDITION - PROCESS ALL MESSAGES TO DEBUG REGULAR VS BUSINESS WHATSAPP
-                            if (message && message.key && 
-                                !isJidBroadcast(message.key.remoteJid) && 
-                                !isJidStatusBroadcast(message.key.remoteJid) && 
-                                !isJidNewsletter(message.key.remoteJid)) {
-                                
-                                console.log('  🎉 MESSAGE PASSED MODIFIED FILTERS - PROCESSING...');
-                                console.log('  🔍 DEBUG INFO:');
-                                console.log('    - fromMe:', message.key.fromMe);
-                                console.log('    - Direction:', message.key.fromMe ? 'OUTGOING' : 'INCOMING');
-                                console.log('    - Will Process:', true);
-                                
-                                await this.handleIncomingMessage(message);
-                            } else {
-                                console.log('  🚫 MESSAGE REJECTED BY FILTERS');
                             }
                         } catch (messageError) {
-                            console.log('  ❌ ERROR PROCESSING INDIVIDUAL MESSAGE:');
-                            console.log('    Error:', messageError.message);
-                            console.log('    Message ID:', message?.key?.id);
-                            console.log('    Stack:', messageError.stack);
-                            
                             logger.error('Error handling individual message', { 
                                 sessionId: this.sessionId, 
                                 messageId: message?.key?.id,
                                 error: messageError.message 
                             });
                         }
-                        
-                        console.log(`───── END MESSAGE ${i + 1} ─────`);
-                    }
-                } else {
-                    console.log('📭 Message event ignored:');
-                    console.log('  Type is not "notify":', type !== 'notify');
-                    console.log('  Messages is not array:', !Array.isArray(messages));
-                    if (type !== 'notify') {
-                        console.log('  Message type received:', type);
-                    }
-                    if (!Array.isArray(messages)) {
-                        console.log('  Messages object type:', typeof messages);
-                        console.log('  Messages content:', messages);
                     }
                 }
                 
-                console.log('════════════════════════════════════════════════════════════════════');
-                console.log('✅ MESSAGE UPSERT EVENT PROCESSING COMPLETED\n');
-                
             } catch (error) {
-                console.log('\n❌ ERROR IN MESSAGE UPSERT EVENT HANDLER:');
-                console.log('Session ID:', this.sessionId);
-                console.log('Error:', error.message);
-                console.log('Stack:', error.stack);
-                console.log('════════════════════════════════════════════════════════════════════\n');
-                
                 logger.error('Error handling incoming message batch', { sessionId: this.sessionId, error: error.message });
             }
         });
 
-        // Add additional event listeners to debug regular WhatsApp connection issues
-        console.log('\n🔧 SETTING UP EVENT LISTENERS FOR SESSION:', this.sessionId);
-        
-        // Monitor all socket events for debugging
-        const originalOn = this.socket.ev.on.bind(this.socket.ev);
-        this.socket.ev.on = (event, handler) => {
-            if (event === 'messages.upsert') {
-                console.log(`📡 Event listener registered for '${event}' on session:`, this.sessionId);
-            }
-            return originalOn(event, handler);
-        };
+        // Remove extensive debug logging for event listener setup
         
         // Add a heartbeat to check if the session is still alive
         // CRITICAL: Clear existing heartbeat to prevent multiple timers
@@ -861,6 +1996,14 @@ class BaileysSession {
                     hasUser: !!this.socket?.user,
                     timestamp: new Date().toISOString()
                 });
+
+                // NEW: Enhanced heartbeat with session health check and backup
+                this.checkSessionHealth().catch(error => {
+                    logger.error('Error in heartbeat session health check', { 
+                        sessionId: this.sessionId, 
+                        error: error.message 
+                    });
+                });
             }
         }, 30000); // Every 30 seconds
         
@@ -876,6 +2019,12 @@ class BaileysSession {
                     clearInterval(this.heartbeatInterval);
                     this.heartbeatInterval = null;
                 }
+                
+                // NEW: Backup system cleanup
+                this.backupEnabled = false; // Disable backup system
+                this.isRestoring = false; // Clear restore flag
+                this.lastBackupTime = null; // Clear backup timestamp
+                this.backupRetryCount = 0; // Reset backup retry count
                 
                 return await originalDestroy();
             };
@@ -951,72 +2100,27 @@ class BaileysSession {
 
     async handleIncomingMessage(message) {
         try {
-            // Enhanced logging for debugging WhatsApp Business vs regular WhatsApp differences
-            console.log('\n═══════════════════════════════════════════════════════════════');
-            console.log('🔔 MESSAGE RECEIVED FOR PROCESSING');
-            console.log('═══════════════════════════════════════════════════════════════');
-            console.log('Session ID:', this.sessionId);
-            console.log('Timestamp:', new Date().toISOString());
-            
-            // CRITICAL: Check message direction first
+            // Check message direction first
             const isIncoming = !message.key.fromMe;
             const isOutgoing = message.key.fromMe;
             
-            console.log('📍 MESSAGE DIRECTION:');
-            console.log('  Is Incoming (fromMe: false):', isIncoming);
-            console.log('  Is Outgoing (fromMe: true):', isOutgoing);
-            console.log('  🎯 WEBHOOK ELIGIBLE:', isIncoming ? 'YES' : 'NO (outgoing messages do not trigger webhooks)');
-            
             if (!message || !message.key) {
-                console.log('❌ INVALID MESSAGE: Missing message or key');
-                console.log('Raw message:', JSON.stringify(message, null, 2));
                 logger.warn('Invalid message received', { sessionId: this.sessionId });
                 return;
             }
 
-            // Log complete message structure for debugging
-            console.log('📱 MESSAGE KEY DETAILS:');
-            console.log('  Message ID:', message.key.id);
-            console.log('  Remote JID:', message.key.remoteJid);
-            console.log('  From Me:', message.key.fromMe);
-            console.log('  Participant:', message.key.participant);
-            
-            console.log('📝 MESSAGE METADATA:');
-            console.log('  Push Name:', message.pushName);
-            console.log('  Message Timestamp:', message.messageTimestamp);
-            console.log('  Message Stub Type:', message.messageStubType);
-            console.log('  Message Stub Parameters:', message.messageStubParameters);
-            
-            // Detect app type from message structure
+            // Detect app type from message structure (keep logic, remove detailed logging)
             let appType = 'unknown';
-            let appVersion = 'unknown';
             let deviceInfo = {};
-            
-            // Enhanced app type detection with detailed logging
-            console.log('🔍 APP TYPE DETECTION ANALYSIS:');
-            console.log('  Has verifiedBizName:', !!message.verifiedBizName, message.verifiedBizName || 'null');
-            console.log('  Has bizPrivacyStatus:', !!message.bizPrivacyStatus, message.bizPrivacyStatus || 'null');
-            console.log('  Has deviceSentMeta:', !!message.deviceSentMeta);
-            console.log('  Has deviceInfo:', !!message.deviceInfo);
-            console.log('  Remote JID:', message.key.remoteJid);
-            console.log('  Message keys:', Object.keys(message));
             
             if (message.verifiedBizName) {
                 appType = 'WhatsApp Business (Verified)';
-                console.log('  ✅ Detected: WhatsApp Business (Verified) - Has verifiedBizName');
             } else if (message.bizPrivacyStatus) {
                 appType = 'WhatsApp Business';
-                console.log('  ✅ Detected: WhatsApp Business - Has bizPrivacyStatus');
             } else if (message.deviceSentMeta || message.deviceInfo) {
-                // Check if there's business-specific metadata
                 appType = 'WhatsApp Business';
-                console.log('  ✅ Detected: WhatsApp Business - Has device metadata');
             } else {
-                // Default to Regular WhatsApp if no business indicators are present
-                // Both regular and business WhatsApp use @s.whatsapp.net for individual chats
-                // The presence of business-specific fields determines the app type, not the JID domain
                 appType = 'Regular WhatsApp';
-                console.log('  ✅ Detected: Regular WhatsApp - No business indicators found');
             }
             
             // Extract device and app information if available
@@ -1026,36 +2130,18 @@ class BaileysSession {
             if (message.userReceipt) {
                 deviceInfo.userReceipt = message.userReceipt;
             }
-            
-            console.log('🏢 APP TYPE DETECTION:');
-            console.log('  Detected App Type:', appType);
-            console.log('  Verified Business Name:', message.verifiedBizName || 'Not available');
-            console.log('  Business Privacy Status:', message.bizPrivacyStatus || 'Not available');
-            console.log('  Device Info:', JSON.stringify(deviceInfo, null, 4));
 
-            // Extract and log message content
+            // Extract message content
             const extractedContent = this.extractMessageContent(message);
-            console.log('💬 MESSAGE CONTENT:');
-            console.log('  Content Type:', extractedContent.type);
-            console.log('  Content:', JSON.stringify(extractedContent, null, 4));
             
-            // Log raw message structure (truncated for readability)
-            console.log('🔍 RAW MESSAGE STRUCTURE (first level keys):');
-            console.log('  Available keys:', Object.keys(message));
-            if (message.message) {
-                console.log('  Message object keys:', Object.keys(message.message));
+            // SIMPLIFIED LOGGING: Only log incoming messages with session ID and content
+            if (isIncoming) {
+                console.log(`📥 [${this.sessionId}] Incoming: ${extractedContent.content || extractedContent.type}`);
             }
 
             const sessionData = await this.database.getSession(this.sessionId);
             
-            console.log('⚙️ SESSION CONFIGURATION:');
-            console.log('  Webhook Status:', sessionData?.webhook_status);
-            console.log('  Webhook URL:', sessionData?.webhook_url);
-            console.log('  Auto Read:', sessionData?.auto_read);
-            console.log('  User ID:', sessionData?.user_id);
-            console.log('  Admin ID:', sessionData?.admin_id);
-            
-            // ⚠️ CRITICAL: Only process webhooks for INCOMING messages
+            // Only process webhooks for INCOMING messages
             if (isIncoming && sessionData && sessionData.webhook_status && sessionData.webhook_url) {
                 const messageData = {
                     sessionId: this.sessionId,
@@ -1066,10 +2152,8 @@ class BaileysSession {
                     message: extractedContent,
                     participant: message.key.participant || null,
                     pushName: message.pushName || null,
-                    // Add app type detection to webhook payload
                     appType: appType,
                     deviceInfo: deviceInfo,
-                    // Add additional metadata for debugging
                     messageMetadata: {
                         verifiedBizName: message.verifiedBizName,
                         bizPrivacyStatus: message.bizPrivacyStatus,
@@ -1080,23 +2164,11 @@ class BaileysSession {
                     }
                 };
 
-                console.log('📤 WEBHOOK PAYLOAD (INCOMING MESSAGE):');
-                console.log(JSON.stringify(messageData, null, 2));
-                console.log('🌐 Sending webhook to:', sessionData.webhook_url);
-
                 try {
                     const webhookResult = await this.webhookManager.sendWebhook(sessionData.webhook_url, messageData);
-                    console.log('✅ WEBHOOK SUCCESS:');
-                    console.log('  Status:', webhookResult.status);
-                    console.log('  Duration:', webhookResult.duration);
-                    console.log('  Response:', JSON.stringify(webhookResult.response, null, 2));
+                    // SIMPLIFIED WEBHOOK LOGGING: Just log success with response
+                    console.log(`✅ Webhook sent successfully - Status: ${webhookResult.status}`);
                 } catch (webhookError) {
-                    console.log('❌ WEBHOOK FAILED:');
-                    console.log('  Error:', webhookError.message);
-                    console.log('  Error Type:', webhookError.errorType || 'Unknown');
-                    console.log('  Status Code:', webhookError.status);
-                    console.log('  Response Data:', JSON.stringify(webhookError.responseData, null, 2));
-                    
                     logger.error('Error sending webhook for message', { 
                         sessionId: this.sessionId, 
                         messageId: message.key.id,
@@ -1104,30 +2176,13 @@ class BaileysSession {
                         appType: appType
                     });
                 }
-            } else if (isOutgoing) {
-                console.log('⚠️ WEBHOOK SKIPPED:');
-                console.log('  Reason: OUTGOING MESSAGE (fromMe: true)');
-                console.log('  Note: Webhooks only trigger for incoming messages');
-                console.log('  App Type Detected:', appType);
-            } else {
-                console.log('⚠️ WEBHOOK SKIPPED:');
-                if (!sessionData) {
-                    console.log('  Reason: Session data not found');
-                } else if (!sessionData.webhook_status) {
-                    console.log('  Reason: Webhook not enabled');
-                } else if (!sessionData.webhook_url) {
-                    console.log('  Reason: No webhook URL configured');
-                }
-                console.log('  App Type Detected:', appType);
             }
 
             // Auto-read functionality (only for incoming messages)
             if (isIncoming && sessionData && sessionData.auto_read) {
                 try {
                     await this.markMessageAsRead(message.key);
-                    console.log('📖 Message marked as read');
                 } catch (readError) {
-                    console.log('❌ Failed to mark message as read:', readError.message);
                     logger.error('Error marking message as read', { 
                         sessionId: this.sessionId, 
                         messageId: message.key.id,
@@ -1137,19 +2192,7 @@ class BaileysSession {
                 }
             }
             
-            console.log('═══════════════════════════════════════════════════════════════');
-            console.log('✅ Message processing completed');
-            console.log('🎯 Summary: Direction =', isIncoming ? 'INCOMING' : 'OUTGOING', '| App Type =', appType, '| Webhook Sent =', isIncoming && sessionData?.webhook_status && sessionData?.webhook_url ? 'YES' : 'NO');
-            console.log('═══════════════════════════════════════════════════════════════\n');
-            
         } catch (error) {
-            console.log('\n❌ ERROR PROCESSING MESSAGE:');
-            console.log('  Session ID:', this.sessionId);
-            console.log('  Message ID:', message?.key?.id);
-            console.log('  Error:', error.message);
-            console.log('  Stack:', error.stack);
-            console.log('═══════════════════════════════════════════════════════════════\n');
-            
             logger.error('Error processing message', { 
                 sessionId: this.sessionId, 
                 messageId: message?.key?.id,
@@ -1495,9 +2538,12 @@ class BaileysSession {
             if (this.socket) {
                 try {
                     // Check socket state before attempting to close
-                    logger.session(this.sessionId, 'Destroying socket', {
-                        readyState: this.socket.readyState,
-                        hasUser: !!this.socket.user
+                    const socketReadyState = this.socket.readyState;
+                    logger.session(this.sessionId, 'Destroying socket - current state', {
+                        readyState: socketReadyState,
+                        hasUser: !!this.socket.user,
+                        stateNames: ['CONNECTING', 'OPEN', 'CLOSING', 'CLOSED'],
+                        currentStateName: ['CONNECTING', 'OPEN', 'CLOSING', 'CLOSED'][socketReadyState] || 'UNKNOWN'
                     });
                     
                     // Remove all event listeners first to prevent race conditions
@@ -1505,32 +2551,99 @@ class BaileysSession {
                         this.socket.ev.removeAllListeners();
                     }
                     
-                    // Close socket based on state
-                    if (this.socket.readyState !== undefined) {
+                    // CRITICAL FIX: Enhanced socket state checking for destroy
+                    if (typeof socketReadyState !== 'undefined') {
                         // WebSocket readyState: 0=CONNECTING, 1=OPEN, 2=CLOSING, 3=CLOSED
-                        if (this.socket.readyState === 0 || this.socket.readyState === 1) {
-                            this.socket.close();
-                        } else {
-                            logger.session(this.sessionId, 'Socket already closed or closing, skipping close() call');
+                        if (socketReadyState === 0 || socketReadyState === 1) {
+                            // Socket is CONNECTING or OPEN - safe to close
+                            try {
+                                logger.session(this.sessionId, 'Destroying socket via close() method', { readyState: socketReadyState });
+                                this.socket.close();
+                            } catch (closeError) {
+                                logger.warn('Error during destroy socket.close()', { 
+                                    sessionId: this.sessionId, 
+                                    error: closeError.message,
+                                    readyState: socketReadyState
+                                });
+                                // Try alternative cleanup method
+                                try {
+                                    logger.session(this.sessionId, 'Attempting socket.end() as destroy fallback');
+                                    this.socket.end();
+                                } catch (endError) {
+                                    logger.warn('Error during destroy socket.end() fallback', { 
+                                        sessionId: this.sessionId, 
+                                        error: endError.message 
+                                    });
+                                }
+                            }
+                        } else if (socketReadyState === 2) {
+                            // Socket is CLOSING - wait for it to close naturally
+                            logger.session(this.sessionId, 'Socket already closing during destroy, waiting for completion');
+                            let waitCount = 0;
+                            while (this.socket.readyState === 2 && waitCount < 10) { // Max 1 second wait
+                                await new Promise(resolve => setTimeout(resolve, 100));
+                                waitCount++;
+                            }
+                            logger.session(this.sessionId, 'Destroy socket close wait completed', { 
+                                finalReadyState: this.socket.readyState,
+                                waitTime: waitCount * 100 + 'ms'
+                            });
+                        } else if (socketReadyState === 3) {
+                            // Socket is already CLOSED - no action needed
+                            logger.session(this.sessionId, 'Socket already closed during destroy, no cleanup needed');
                         }
                     } else {
-                        // Fallback for other socket types
-                        this.socket.end();
+                        // Socket doesn't have readyState - try gentle cleanup
+                        logger.session(this.sessionId, 'Socket without readyState during destroy, attempting gentle cleanup');
+                        try {
+                            // CRITICAL FIX: Enhanced gentle cleanup with state checking
+                            if (this.socket && typeof this.socket.end === 'function') {
+                                // Check if socket has internal state that would indicate it's safe to end
+                                const hasInternalState = this.socket._socket || this.socket.readyState !== undefined;
+                                
+                                if (hasInternalState) {
+                                    logger.session(this.sessionId, 'Socket has internal state, attempting end()');
+                                    this.socket.end();
+                                } else {
+                                    logger.session(this.sessionId, 'Socket lacks internal state, skipping end() to prevent crash');
+                                }
+                            } else if (this.socket && typeof this.socket.close === 'function') {
+                                // Try close as alternative
+                                const hasInternalState = this.socket._socket || this.socket.readyState !== undefined;
+                                
+                                if (hasInternalState) {
+                                    logger.session(this.sessionId, 'Socket has internal state, attempting close()');
+                                    this.socket.close();
+                                } else {
+                                    logger.session(this.sessionId, 'Socket lacks internal state, skipping close() to prevent crash');
+                                }
+                            } else {
+                                logger.session(this.sessionId, 'Socket lacks end() and close() methods, skipping cleanup');
+                            }
+                        } catch (gentleCleanupError) {
+                            logger.warn('Error during gentle socket cleanup in destroy', { 
+                                sessionId: this.sessionId, 
+                                error: gentleCleanupError.message,
+                                errorType: gentleCleanupError.constructor.name
+                            });
+                        }
                     }
                     
                     // Wait a bit for cleanup to complete
                     await new Promise(resolve => setTimeout(resolve, 500));
                     
                 } catch (socketError) {
-                    // Log the error but don't throw it - destruction should be resilient
-                    logger.warn('Error ending socket during destroy', { 
+                    // Comprehensive error logging but don't let it crash the process
+                    logger.error('Socket cleanup failed during destroy - continuing', { 
                         sessionId: this.sessionId, 
                         error: socketError.message,
-                        socketState: this.socket.readyState 
+                        errorType: socketError.constructor.name,
+                        socketExists: !!this.socket,
+                        socketReadyState: this.socket?.readyState
                     });
                 }
                 
-                // Clear the socket reference
+                // Always clear the socket reference regardless of cleanup success
                 this.socket = null;
             }
             
@@ -1564,6 +2677,105 @@ class BaileysSession {
         this.qrCodeScanned = false;
         this.authenticationStartTime = null;
         this.preventQRRegeneration = false;
+    }
+
+    // NEW: Public methods for backup management
+    async createManualBackup() {
+        logger.session(this.sessionId, 'Manual backup requested');
+        return await this.createSessionBackup();
+    }
+
+    async restoreFromBackup() {
+        logger.session(this.sessionId, 'Manual restore requested');
+        return await this.restoreSessionFromBackupSequential();
+    }
+
+    // Get backup status and information
+    getBackupInfo() {
+        const latestBackupDir = path.join(this.backupDir, 'latest');
+        const hasBackup = fs.existsSync(latestBackupDir);
+        
+        let backupInfo = {
+            hasBackup: hasBackup,
+            backupEnabled: this.backupEnabled,
+            lastBackupTime: this.lastBackupTime,
+            backupInterval: this.backupInterval,
+            isRestoring: this.isRestoring
+        };
+
+        if (hasBackup) {
+            try {
+                const metadataPath = path.join(latestBackupDir, 'backup_metadata.json');
+                if (fs.existsSync(metadataPath)) {
+                    const metadata = JSON.parse(fs.readFileSync(metadataPath, 'utf8'));
+                    backupInfo.backupMetadata = metadata;
+                    backupInfo.backupAge = Date.now() - new Date(metadata.timestamp).getTime();
+                }
+                
+                const backupFiles = fs.readdirSync(latestBackupDir).filter(file => 
+                    !file.endsWith('_metadata.json')
+                );
+                backupInfo.backupFileCount = backupFiles.length;
+                backupInfo.backupFiles = backupFiles;
+            } catch (error) {
+                backupInfo.backupError = error.message;
+            }
+        }
+
+        return backupInfo;
+    }
+
+    // Enable or disable backup system
+    setBackupEnabled(enabled) {
+        this.backupEnabled = enabled;
+        logger.session(this.sessionId, `Backup system ${enabled ? 'enabled' : 'disabled'}`);
+    }
+
+    // NEW: Clean up old backup files
+    cleanupOldBackups() {
+        try {
+            const backupDirs = fs.readdirSync(this.backupDir)
+                .filter(dir => dir.startsWith('backup_') && dir !== 'latest')
+                .map(dir => ({
+                    name: dir,
+                    path: path.join(this.backupDir, dir),
+                    stats: fs.statSync(path.join(this.backupDir, dir))
+                }))
+                .sort((a, b) => b.stats.mtime - a.stats.mtime); // Sort by modification time (newest first)
+
+            // Keep only the 5 most recent backups
+            const maxBackups = 5;
+            if (backupDirs.length > maxBackups) {
+                const toDelete = backupDirs.slice(maxBackups);
+                
+                for (const backup of toDelete) {
+                    try {
+                        fs.rmSync(backup.path, { recursive: true, force: true });
+                        logger.session(this.sessionId, `Cleaned up old backup: ${backup.name}`);
+                    } catch (deleteError) {
+                        logger.warn('Error deleting old backup', {
+                            sessionId: this.sessionId,
+                            backup: backup.name,
+                            error: deleteError.message
+                        });
+                    }
+                }
+
+                logger.session(this.sessionId, `Backup cleanup completed, removed ${toDelete.length} old backups`);
+            }
+
+        } catch (error) {
+            logger.warn('Error during backup cleanup', { 
+                sessionId: this.sessionId, 
+                error: error.message 
+            });
+        }
+    }
+
+    // BACKWARD COMPATIBILITY: Keep original method name for API compatibility
+    async restoreSessionFromBackup() {
+        logger.session(this.sessionId, 'Legacy restore method called - using sequential restoration');
+        return await this.restoreSessionFromBackupSequential();
     }
 }
 
