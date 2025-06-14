@@ -249,6 +249,51 @@ router.post('/getQRCode', validateAuthToken, validateSenderId, async (req, res) 
     }
 });
 
+// Helper function to determine message delivery status
+const getMessageDeliveryStatus = (error, validationResult) => {
+    if (!error) {
+        // Message sent successfully
+        if (validationResult && validationResult.isRegistered === false) {
+            return "not on WA";
+        }
+        return "delivered";
+    }
+    
+    // Error occurred - determine the type
+    const errorMessage = error.message.toLowerCase();
+    
+    // Group access forbidden errors (user not in group)
+    if (errorMessage.includes('forbidden') || 
+        errorMessage.includes('not a participant') ||
+        errorMessage.includes('not in group') ||
+        errorMessage.includes('group access denied') ||
+        error.message === 'forbidden') {
+        return "skipped";
+    }
+    
+    // Session-related errors
+    if (errorMessage.includes('session not connected') ||
+        errorMessage.includes('connection timeout') ||
+        errorMessage.includes('session requires fresh qr') ||
+        errorMessage.includes('session offline') ||
+        errorMessage.includes('qr scan') ||
+        errorMessage.includes('auto-reconnect') ||
+        errorMessage.includes('requires_qr') ||
+        errorMessage.includes('logged_out')) {
+        return "session offline";
+    }
+    
+    // WhatsApp registration errors
+    if (errorMessage.includes('not registered on whatsapp') ||
+        errorMessage.includes('phone number') && errorMessage.includes('not registered') ||
+        errorMessage.includes('not on whatsapp')) {
+        return "not on WA";
+    }
+    
+    // General failure for any other errors
+    return "failed";
+};
+
 // Send Text SMS endpoint
 router.post('/sendTextSMS', validateAuthToken, validateSenderId, checkSessionExists, async (req, res) => {
     try {
@@ -268,6 +313,7 @@ router.post('/sendTextSMS', validateAuthToken, validateSenderId, checkSessionExi
                 success: false,
                 message: 'Missing required parameters',
                 error: 'receiverId (or number) and messageText are required',
+                status: "failed",
                 data: {
                     senderId: finalSenderId,
                     received: {
@@ -288,6 +334,7 @@ router.post('/sendTextSMS', validateAuthToken, validateSenderId, checkSessionExi
                     success: false,
                     message: 'Invalid receiver ID format',
                     error: 'Invalid receiverId/number format. Must be a valid phone number, group ID, or WhatsApp JID',
+                    status: "failed",
                     data: {
                         senderId: finalSenderId,
                         receiverId: finalReceiverId,
@@ -310,9 +357,13 @@ router.post('/sendTextSMS', validateAuthToken, validateSenderId, checkSessionExi
         
         const result = await sessionManager.sendTextMessage(finalSenderId, finalReceiverId, messageText);
         
+        // Determine delivery status
+        const deliveryStatus = getMessageDeliveryStatus(null, result.validationResult);
+        
         res.json({
             success: true,
             message: 'Text message sent successfully',
+            status: deliveryStatus,
             data: {
                 messageId: result.key.id,
                 senderId: finalSenderId,
@@ -330,10 +381,15 @@ router.post('/sendTextSMS', validateAuthToken, validateSenderId, checkSessionExi
         
     } catch (error) {
         logger.error('Error in /sendTextSMS', { error: error.message, senderId: req.body?.senderId || req.body?.sessionId });
+        
+        // Determine error status
+        const errorStatus = getMessageDeliveryStatus(error);
+        
         res.status(500).json({
             success: false,
             message: 'Failed to send text message',
             error: error.message,
+            status: errorStatus,
             senderId: req.body?.senderId || req.body?.sessionId
         });
     }
@@ -361,6 +417,7 @@ router.post('/sendMediaSMS', validateAuthToken, validateSenderId, checkSessionEx
                 success: false,
                 message: 'Missing required parameters',
                 error: 'receiverId (or number) and mediaurl (or media) are required',
+                status: "failed",
                 data: {
                     senderId: finalSenderId,
                     received: {
@@ -381,6 +438,7 @@ router.post('/sendMediaSMS', validateAuthToken, validateSenderId, checkSessionEx
                     success: false,
                     message: 'Invalid receiver ID format',
                     error: 'Invalid receiverId/number format. Must be a valid phone number, group ID, or WhatsApp JID',
+                    status: "failed",
                     data: {
                         senderId: finalSenderId,
                         receiverId: finalReceiverId,
@@ -402,6 +460,7 @@ router.post('/sendMediaSMS', validateAuthToken, validateSenderId, checkSessionEx
                 success: false,
                 message: 'Invalid media URL format',
                 error: 'Invalid mediaurl/media format. Must be a valid HTTP/HTTPS URL',
+                status: "failed",
                 data: {
                     senderId: finalSenderId,
                     mediaurl: finalMediaUrl
@@ -458,6 +517,7 @@ router.post('/sendMediaSMS', validateAuthToken, validateSenderId, checkSessionEx
                 success: false,
                 message: 'Failed to download media',
                 error: 'Failed to download media from URL: ' + downloadError.message,
+                status: "failed",
                 data: {
                     senderId: finalSenderId,
                     mediaurl: finalMediaUrl
@@ -467,9 +527,13 @@ router.post('/sendMediaSMS', validateAuthToken, validateSenderId, checkSessionEx
         
         const result = await sessionManager.sendMediaMessage(finalSenderId, finalReceiverId, mediaBuffer, mediaType, finalCaption, originalFileName);
         
+        // Determine delivery status
+        const deliveryStatus = getMessageDeliveryStatus(null, result.validationResult);
+        
         res.json({
             success: true,
             message: 'Media message sent successfully',
+            status: deliveryStatus,
             data: {
                 messageId: result.key.id,
                 senderId: finalSenderId,
@@ -490,10 +554,15 @@ router.post('/sendMediaSMS', validateAuthToken, validateSenderId, checkSessionEx
         
     } catch (error) {
         logger.error('Error in /sendMediaSMS', { error: error.message, senderId: req.body?.senderId || req.body?.sessionId });
+        
+        // Determine error status
+        const errorStatus = getMessageDeliveryStatus(error);
+        
         res.status(500).json({
             success: false,
             message: 'Failed to send media message',
             error: error.message,
+            status: errorStatus,
             senderId: req.body?.senderId || req.body?.sessionId
         });
     }
@@ -1376,15 +1445,20 @@ router.post('/logoutSession', validateAuthToken, validateSenderId, checkSessionE
             await sessionManager.database.updateSessionStatus(finalSenderId, 'logged_out');
             logger.info('Session marked as logged out (was not active)', { sessionId: finalSenderId });
         }
-        
-        // Delete all authentication files after successful logout
+
+        // ENHANCED: Delete both authentication files AND backup files after successful logout
         try {
             const sessionDir = path.join(process.env.SESSION_STORAGE_PATH || './sessions', finalSenderId);
             const authDir = path.join(sessionDir, 'auth');
+            const backupDir = path.join(sessionDir, 'backup');
             
+            let deletedAuthFiles = [];
+            let deletedBackupFiles = [];
+            
+            // Delete all authentication files
             if (fs.existsSync(authDir)) {
                 // Get list of files before deletion for logging
-                const authFiles = fs.readdirSync(authDir);
+                deletedAuthFiles = fs.readdirSync(authDir);
                 
                 // Delete all authentication files
                 fs.rmSync(authDir, { recursive: true, force: true });
@@ -1394,33 +1468,54 @@ router.post('/logoutSession', validateAuthToken, validateSenderId, checkSessionE
                 
                 logger.info('Authentication files deleted after logout', { 
                     sessionId: finalSenderId,
-                    deletedFiles: authFiles,
+                    deletedFiles: deletedAuthFiles,
                     authDir: authDir
                 });
-                
-                console.log(`🗑️ LOGOUT: Deleted ${authFiles.length} authentication files for session ${finalSenderId}`);
-                console.log(`📁 Files deleted: ${authFiles.join(', ')}`);
-            } else {
-                logger.info('No authentication directory found to delete', { sessionId: finalSenderId });
             }
+            
+            // CRITICAL FIX: Delete all backup files to prevent restoration interference
+            if (fs.existsSync(backupDir)) {
+                // Get list of backup files/directories before deletion for logging
+                const backupContents = fs.readdirSync(backupDir);
+                deletedBackupFiles = backupContents;
+                
+                // Delete entire backup directory
+                fs.rmSync(backupDir, { recursive: true, force: true });
+                
+                // Recreate empty backup directory
+                fs.mkdirSync(backupDir, { recursive: true });
+                
+                logger.info('Backup files deleted after logout', { 
+                    sessionId: finalSenderId,
+                    deletedBackups: deletedBackupFiles,
+                    backupDir: backupDir
+                });
+            }
+            
+            console.log(`🗑️ LOGOUT: Session cleanup completed for ${finalSenderId}`);
+            console.log(`📁 Auth files deleted: ${deletedAuthFiles.length} files (${deletedAuthFiles.join(', ')})`);
+            console.log(`💾 Backup files deleted: ${deletedBackupFiles.length} items (${deletedBackupFiles.join(', ')})`);
+            console.log(`✅ Fresh QR code generation ready - no interference from old backups`);
+            
         } catch (deleteError) {
             // Log the error but don't fail the logout operation
-            logger.error('Error deleting authentication files after logout', { 
+            logger.error('Error deleting authentication/backup files after logout', { 
                 sessionId: finalSenderId, 
                 error: deleteError.message 
             });
-            console.log(`❌ Warning: Could not delete auth files for session ${finalSenderId}: ${deleteError.message}`);
+            console.log(`❌ Warning: Could not delete files for session ${finalSenderId}: ${deleteError.message}`);
         }
         
         res.json({
             success: true,
-            message: 'Session logged out successfully and authentication files cleared',
+            message: 'Session logged out successfully - all authentication and backup files cleared',
             data: {
                 senderId: finalSenderId,
                 status: 'logged_out',
                 authFilesCleared: true,
+                backupFilesCleared: true,
                 timestamp: new Date().toISOString(),
-                note: 'QR code scan will be required for next connection'
+                note: 'Fresh QR code scan will be required for next connection - no backup restoration interference'
             }
         });
         
@@ -2365,6 +2460,661 @@ router.post('/getAuthStatus', validateAuthToken, validateSenderId, async (req, r
                 state: 'ERROR',
                 shouldStopPolling: false
             }
+        });
+    }
+});
+
+
+// NEW: Backup Management Endpoints
+
+// Create manual backup
+router.post('/createBackup', validateAuthToken, validateSenderId, checkSessionExists, async (req, res) => {
+    try {
+        const { senderId } = req.body;
+        
+        logger.api('/createBackup', 'Manual backup requested', { senderId });
+        
+        const session = sessionManager.getSession(senderId);
+        if (!session) {
+            return res.status(404).json({
+                success: false,
+                message: 'Session not found',
+                error: 'Session not found in memory',
+                data: { senderId }
+            });
+        }
+
+        const backupCreated = await session.createManualBackup();
+        
+        if (backupCreated) {
+            const backupInfo = session.getBackupInfo();
+            res.json({
+                success: true,
+                message: 'Backup created successfully',
+                data: {
+                    senderId,
+                    backupCreated: true,
+                    backupInfo: backupInfo,
+                    timestamp: new Date().toISOString()
+                }
+            });
+        } else {
+            res.status(400).json({
+                success: false,
+                message: 'Failed to create backup',
+                error: 'Backup creation failed - session may not be ready or files may be missing',
+                data: { senderId }
+            });
+        }
+        
+    } catch (error) {
+        logger.error('Error creating manual backup', { senderId: req.body?.senderId, error: error.message });
+        res.status(500).json({
+            success: false,
+            message: 'Failed to create backup',
+            error: error.message,
+            data: { senderId: req.body?.senderId }
+        });
+    }
+});
+
+// Restore from backup
+router.post('/restoreBackup', validateAuthToken, validateSenderId, checkSessionExists, async (req, res) => {
+    try {
+        const { senderId } = req.body;
+        
+        logger.api('/restoreBackup', 'Manual restore requested', { senderId });
+        
+        const session = sessionManager.getSession(senderId);
+        if (!session) {
+            return res.status(404).json({
+                success: false,
+                message: 'Session not found',
+                error: 'Session not found in memory',
+                data: { senderId }
+            });
+        }
+
+        const restored = await session.restoreFromBackup();
+        
+        if (restored) {
+            const backupInfo = session.getBackupInfo();
+            res.json({
+                success: true,
+                message: 'Session restored from backup successfully',
+                data: {
+                    senderId,
+                    restored: true,
+                    backupInfo: backupInfo,
+                    timestamp: new Date().toISOString(),
+                    note: 'Session will attempt to reconnect automatically'
+                }
+            });
+        } else {
+            res.status(400).json({
+                success: false,
+                message: 'Failed to restore from backup',
+                error: 'Restore failed - backup may not exist or be corrupted',
+                data: { senderId }
+            });
+        }
+        
+    } catch (error) {
+        logger.error('Error restoring from backup', { senderId: req.body?.senderId, error: error.message });
+        res.status(500).json({
+            success: false,
+            message: 'Failed to restore from backup',
+            error: error.message,
+            data: { senderId: req.body?.senderId }
+        });
+    }
+});
+
+// Get backup information
+router.post('/getBackupInfo', validateAuthToken, validateSenderId, checkSessionExists, async (req, res) => {
+    try {
+        const { senderId } = req.body;
+        
+        logger.api('/getBackupInfo', 'Backup info requested', { senderId });
+        
+        const session = sessionManager.getSession(senderId);
+        if (!session) {
+            return res.status(404).json({
+                success: false,
+                message: 'Session not found',
+                error: 'Session not found in memory',
+                data: { senderId }
+            });
+        }
+
+        const backupInfo = session.getBackupInfo();
+        
+        res.json({
+            success: true,
+            message: 'Backup information retrieved successfully',
+            data: {
+                senderId,
+                backupInfo: backupInfo,
+                timestamp: new Date().toISOString()
+            }
+        });
+        
+    } catch (error) {
+        logger.error('Error getting backup info', { senderId: req.body?.senderId, error: error.message });
+        res.status(500).json({
+            success: false,
+            message: 'Failed to get backup information',
+            error: error.message,
+            data: { senderId: req.body?.senderId }
+        });
+    }
+});
+
+// Enable/disable backup system
+router.post('/setBackupEnabled', validateAuthToken, validateSenderId, checkSessionExists, async (req, res) => {
+    try {
+        const { senderId, enabled } = req.body;
+        
+        if (typeof enabled !== 'boolean') {
+            return res.status(400).json({
+                success: false,
+                message: 'Invalid enabled parameter',
+                error: 'enabled parameter must be a boolean (true/false)',
+                data: { senderId }
+            });
+        }
+        
+        logger.api('/setBackupEnabled', 'Backup system toggle requested', { senderId, enabled });
+        
+        const session = sessionManager.getSession(senderId);
+        if (!session) {
+            return res.status(404).json({
+                success: false,
+                message: 'Session not found',
+                error: 'Session not found in memory',
+                data: { senderId }
+            });
+        }
+
+        session.setBackupEnabled(enabled);
+        const backupInfo = session.getBackupInfo();
+        
+        res.json({
+            success: true,
+            message: `Backup system ${enabled ? 'enabled' : 'disabled'} successfully`,
+            data: {
+                senderId,
+                backupEnabled: enabled,
+                backupInfo: backupInfo,
+                timestamp: new Date().toISOString()
+            }
+        });
+        
+    } catch (error) {
+        logger.error('Error setting backup enabled state', { senderId: req.body?.senderId, error: error.message });
+        res.status(500).json({
+            success: false,
+            message: 'Failed to set backup enabled state',
+            error: error.message,
+            data: { senderId: req.body?.senderId }
+        });
+    }
+});
+
+// NEW: Session Integrity Check Endpoints
+
+// Perform comprehensive session integrity check
+router.post('/integrityCheck', validateAuthToken, validateSenderId, checkSessionExists, async (req, res) => {
+    try {
+        const { senderId } = req.body;
+        
+        logger.api('/integrityCheck', 'Session integrity check requested', { senderId });
+        
+        const session = sessionManager.getSession(senderId);
+        if (!session) {
+            return res.status(404).json({
+                success: false,
+                message: 'Session not found',
+                error: 'Session not found in memory',
+                data: { senderId }
+            });
+        }
+
+        // Perform comprehensive integrity check
+        const integrityCheck = await session.performPreBackupIntegrityCheck();
+        const authValidation = await session.validateAuthFiles();
+        const connectionInfo = session.getConnectionInfo();
+        const backupInfo = session.getBackupInfo();
+
+        // Calculate overall health score
+        let healthScore = 0;
+        if (integrityCheck.passed) healthScore += 40;
+        if (authValidation.valid) healthScore += 30;
+        if (session.isSessionConnected()) healthScore += 20;
+        if (backupInfo.hasBackup) healthScore += 10;
+
+        const healthStatus = healthScore >= 80 ? 'excellent' : 
+                           healthScore >= 60 ? 'good' : 
+                           healthScore >= 40 ? 'warning' : 'critical';
+
+        res.json({
+            success: true,
+            message: 'Session integrity check completed',
+            data: {
+                senderId,
+                healthScore: healthScore,
+                healthStatus: healthStatus,
+                integrityCheck: {
+                    passed: integrityCheck.passed,
+                    reason: integrityCheck.reason,
+                    details: integrityCheck.details
+                },
+                authValidation: {
+                    valid: authValidation.valid,
+                    reason: authValidation.reason
+                },
+                connectionInfo: connectionInfo,
+                backupInfo: backupInfo,
+                recommendations: generateHealthRecommendations(healthScore, integrityCheck, authValidation, backupInfo),
+                timestamp: new Date().toISOString()
+            }
+        });
+        
+    } catch (error) {
+        logger.error('Error performing integrity check', { senderId: req.body?.senderId, error: error.message });
+        res.status(500).json({
+            success: false,
+            message: 'Failed to perform integrity check',
+            error: error.message,
+            data: { senderId: req.body?.senderId }
+        });
+    }
+});
+
+// Validate backup integrity
+router.post('/validateBackup', validateAuthToken, validateSenderId, checkSessionExists, async (req, res) => {
+    try {
+        const { senderId } = req.body;
+        
+        logger.api('/validateBackup', 'Backup validation requested', { senderId });
+        
+        const session = sessionManager.getSession(senderId);
+        if (!session) {
+            return res.status(404).json({
+                success: false,
+                message: 'Session not found',
+                error: 'Session not found in memory',
+                data: { senderId }
+            });
+        }
+
+        const backupInfo = session.getBackupInfo();
+        
+        if (!backupInfo.hasBackup) {
+            return res.status(404).json({
+                success: false,
+                message: 'No backup found',
+                error: 'No backup exists for this session',
+                data: { senderId }
+            });
+        }
+
+        // Validate backup files
+        const fs = require('fs');
+        const path = require('path');
+        const latestBackupDir = path.join(process.env.SESSION_STORAGE_PATH || './sessions', senderId, 'backup', 'latest');
+        
+        let validationResults = {};
+        let overallValid = true;
+        
+        if (fs.existsSync(latestBackupDir)) {
+            const backupFiles = fs.readdirSync(latestBackupDir).filter(file => 
+                file.includes('creds') && file.endsWith('.json')
+            );
+            
+            for (const file of backupFiles) {
+                const filePath = path.join(latestBackupDir, file);
+                const validation = await session.validateCredentialFileIntegrity(filePath, file);
+                validationResults[file] = validation;
+                if (!validation.valid) {
+                    overallValid = false;
+                }
+            }
+        } else {
+            overallValid = false;
+            validationResults.error = 'Backup directory not found';
+        }
+
+        res.json({
+            success: true,
+            message: 'Backup validation completed',
+            data: {
+                senderId,
+                backupValid: overallValid,
+                backupInfo: backupInfo,
+                validationResults: validationResults,
+                timestamp: new Date().toISOString()
+            }
+        });
+        
+    } catch (error) {
+        logger.error('Error validating backup', { senderId: req.body?.senderId, error: error.message });
+        res.status(500).json({
+            success: false,
+            message: 'Failed to validate backup',
+            error: error.message,
+            data: { senderId: req.body?.senderId }
+        });
+    }
+});
+
+// Helper function to generate health recommendations
+function generateHealthRecommendations(healthScore, integrityCheck, authValidation, backupInfo) {
+    const recommendations = [];
+    
+    if (healthScore < 60) {
+        recommendations.push('Session health is below optimal - consider troubleshooting');
+    }
+    
+    if (!integrityCheck.passed) {
+        recommendations.push(`Session integrity issue: ${integrityCheck.reason}`);
+        if (integrityCheck.details.integrityScore < 70) {
+            recommendations.push('Consider restarting the session or restoring from backup');
+        }
+    }
+    
+    if (!authValidation.valid) {
+        recommendations.push(`Authentication files corrupted: ${authValidation.reason}`);
+        recommendations.push('Consider restoring from backup or re-authenticating');
+    }
+    
+    if (!backupInfo.hasBackup) {
+        recommendations.push('No backup available - create a backup when session is stable');
+    } else if (backupInfo.backupAge && backupInfo.backupAge > 24 * 60 * 60 * 1000) {
+        recommendations.push('Backup is older than 24 hours - consider creating a fresh backup');
+    }
+    
+    if (recommendations.length === 0) {
+        recommendations.push('Session is healthy - no immediate action required');
+    }
+    
+    return recommendations;
+}
+
+// NEW: Session Status and Reset Management
+
+// Get comprehensive session status
+router.post('/getSessionStatus', validateAuthToken, validateSenderId, async (req, res) => {
+    try {
+        const { senderId } = req.body;
+        
+        logger.api('/getSessionStatus', 'Session status check requested', { senderId });
+        
+        // Get session from database
+        const sessionData = await database.getSession(senderId);
+        if (!sessionData) {
+            return res.status(404).json({
+                success: false,
+                message: 'Session not found',
+                error: 'Session not found in database',
+                data: { senderId }
+            });
+        }
+
+        // Get session from memory
+        const session = sessionManager.getSession(senderId);
+        const inMemory = !!session;
+        
+        let sessionInfo = {
+            sessionId: senderId,
+            databaseStatus: sessionData.status,
+            inMemory: inMemory,
+            isConnected: false,
+            hasAuthData: false,
+            hasSocket: false,
+            hasUser: false,
+            requiresQR: false,
+            consecutiveLogoutAttempts: 0,
+            canSendMessages: false,
+            lastActivity: null,
+            createdAt: sessionData.created_at,
+            updatedAt: sessionData.updated_at
+        };
+
+        if (session) {
+            sessionInfo.isConnected = session.isSessionConnected();
+            sessionInfo.hasAuthData = session.hasAuthData();
+            sessionInfo.hasSocket = !!session.socket;
+            sessionInfo.hasUser = !!(session.socket && session.socket.user);
+            sessionInfo.consecutiveLogoutAttempts = session.consecutiveLogoutAttempts || 0;
+            sessionInfo.lastActivity = session.lastActivity;
+            sessionInfo.retryCount = session.retryCount;
+            sessionInfo.maxRetries = session.maxRetries;
+        }
+
+        // Determine if session requires QR
+        sessionInfo.requiresQR = sessionData.status === 'requires_qr' || 
+                                sessionData.status === 'logged_out' ||
+                                sessionInfo.consecutiveLogoutAttempts >= 3;
+
+        // Determine if session can send messages
+        sessionInfo.canSendMessages = sessionInfo.isConnected && 
+                                     !sessionInfo.requiresQR && 
+                                     sessionData.status === 'connected';
+
+        // Add recommendation
+        let recommendation = '';
+        if (sessionInfo.requiresQR) {
+            recommendation = 'Generate new QR code and scan with your device';
+        } else if (!sessionInfo.isConnected && sessionData.status !== 'requires_qr') {
+            recommendation = 'Session is connecting or recovering';
+        } else if (sessionInfo.isConnected && sessionInfo.canSendMessages) {
+            recommendation = 'Session is ready for messaging';
+        } else {
+            recommendation = 'Check session configuration';
+        }
+
+        sessionInfo.recommendation = recommendation;
+
+        res.json({
+            success: true,
+            message: 'Session status retrieved successfully',
+            data: sessionInfo
+        });
+
+    } catch (error) {
+        logger.error('Error in /getSessionStatus', { 
+            senderId: req.body.senderId, 
+            error: error.message 
+        });
+        res.status(500).json({
+            success: false,
+            message: 'Failed to get session status',
+            error: error.message
+        });
+    }
+});
+
+// Reset session when credentials become invalid
+router.post('/resetSession', validateAuthToken, validateSenderId, async (req, res) => {
+    try {
+        const { senderId, force = false } = req.body;
+        
+        logger.api('/resetSession', 'Session reset requested', { senderId, force });
+        
+        const session = sessionManager.getSession(senderId);
+        if (!session) {
+            return res.status(404).json({
+                success: false,
+                message: 'Session not found',
+                error: 'Session not found in memory',
+                data: { senderId }
+            });
+        }
+
+        // Check if reset is needed
+        const sessionData = await database.getSession(senderId);
+        const needsReset = force || 
+                          sessionData?.status === 'requires_qr' || 
+                          sessionData?.status === 'logged_out' ||
+                          (session.consecutiveLogoutAttempts && session.consecutiveLogoutAttempts >= 2);
+
+        if (!needsReset && !force) {
+            return res.json({
+                success: false,
+                message: 'Session reset not needed',
+                data: {
+                    senderId,
+                    currentStatus: sessionData?.status,
+                    consecutiveLogoutAttempts: session.consecutiveLogoutAttempts || 0,
+                    suggestion: 'Session appears to be working normally'
+                }
+            });
+        }
+
+        logger.session(senderId, 'Performing manual session reset', {
+            force: force,
+            currentStatus: sessionData?.status,
+            consecutiveLogoutAttempts: session.consecutiveLogoutAttempts || 0
+        });
+
+        try {
+            // Stop the session
+            if (session.heartbeatInterval) {
+                clearInterval(session.heartbeatInterval);
+                session.heartbeatInterval = null;
+            }
+
+            // CRITICAL: Disable backup system to prevent restoration interference
+            if (session.setBackupEnabled) {
+                session.setBackupEnabled(false);
+                logger.session(senderId, 'Backup system disabled for reset');
+            }
+
+            // Clear authentication state
+            session.clearAuthenticationState();
+            session.consecutiveLogoutAttempts = 0;
+            session.retryCount = 0;
+            session.isInitialized = false;
+            session.authState = null;
+            session.saveCreds = null;
+
+            // Clear QR data
+            session.qrCodeData = null;
+            session.qrCodeString = null;
+            session.qrCodeTimestamp = null;
+
+            // ENHANCED: Clear both auth files AND backup files to prevent restoration interference
+            let deletedAuthFiles = [];
+            let deletedBackupFiles = [];
+            
+            // Clear auth files
+            if (fs.existsSync(session.authDir)) {
+                const authFiles = fs.readdirSync(session.authDir);
+                deletedAuthFiles = authFiles;
+                for (const file of authFiles) {
+                    try {
+                        fs.unlinkSync(path.join(session.authDir, file));
+                        logger.session(senderId, `Cleared auth file during reset: ${file}`);
+                    } catch (unlinkError) {
+                        logger.warn('Error clearing auth file during reset', {
+                            sessionId: senderId,
+                            file,
+                            error: unlinkError.message
+                        });
+                    }
+                }
+            }
+
+            // CRITICAL: Clear backup files to prevent restoration interference
+            if (fs.existsSync(session.backupDir)) {
+                const backupContents = fs.readdirSync(session.backupDir);
+                deletedBackupFiles = backupContents;
+                
+                // Delete entire backup directory
+                fs.rmSync(session.backupDir, { recursive: true, force: true });
+                
+                // Recreate empty backup directory
+                fs.mkdirSync(session.backupDir, { recursive: true });
+                
+                logger.session(senderId, 'Backup files cleared during reset', {
+                    deletedBackups: deletedBackupFiles
+                });
+            }
+
+            // Destroy socket safely
+            if (session.socket) {
+                try {
+                    if (session.socket.ev) {
+                        session.socket.ev.removeAllListeners();
+                    }
+                    
+                    const socketReadyState = session.socket.readyState;
+                    if (typeof socketReadyState !== 'undefined' && (socketReadyState === 0 || socketReadyState === 1)) {
+                        session.socket.close();
+                    }
+                } catch (socketError) {
+                    logger.warn('Error closing socket during reset', {
+                        sessionId: senderId,
+                        error: socketError.message
+                    });
+                }
+                session.socket = null;
+            }
+
+            // Update database status
+            await database.updateSessionStatus(senderId, 'requires_qr');
+
+            // Reset connection flags
+            session.isConnected = false;
+            session.isConnecting = false;
+            session.socketCreateLock = false;
+            session.connectionPromise = null;
+
+            logger.session(senderId, 'Session reset completed successfully');
+            
+            console.log(`🔄 RESET: Session cleanup completed for ${senderId}`);
+            console.log(`📁 Auth files deleted: ${deletedAuthFiles.length} files (${deletedAuthFiles.join(', ')})`);
+            console.log(`💾 Backup files deleted: ${deletedBackupFiles.length} items (${deletedBackupFiles.join(', ')})`);
+            console.log(`✅ Fresh QR code generation ready - no backup restoration interference`);
+
+            res.json({
+                success: true,
+                message: 'Session reset successfully - all authentication and backup files cleared',
+                data: {
+                    senderId,
+                    status: 'requires_qr',
+                    authFilesCleared: deletedAuthFiles.length,
+                    backupFilesCleared: deletedBackupFiles.length,
+                    message: 'Session has been completely reset. Generate a new QR code to reconnect.',
+                    nextStep: 'Call /getQRCode to generate a new QR code',
+                    note: 'No backup restoration interference - fresh authentication required'
+                }
+            });
+
+        } catch (resetError) {
+            logger.error('Error during session reset', {
+                sessionId: senderId,
+                error: resetError.message
+            });
+
+            res.status(500).json({
+                success: false,
+                message: 'Session reset failed',
+                error: resetError.message,
+                data: { senderId }
+            });
+        }
+
+    } catch (error) {
+        logger.error('Error in /resetSession', { 
+            senderId: req.body.senderId, 
+            error: error.message 
+        });
+        res.status(500).json({
+            success: false,
+            message: 'Failed to reset session',
+            error: error.message
         });
     }
 });
