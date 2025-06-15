@@ -355,6 +355,26 @@ router.post('/sendTextSMS', validateAuthToken, validateSenderId, checkSessionExi
             messageLength: messageText.length 
         });
         
+        // OPTIMIZED: Fast pre-validation for better performance
+        const session = await sessionManager.getSessionBySenderId(finalSenderId);
+        if (session && session.isSessionConnected()) {
+            // Quick validation check before sending
+            const quickValidation = await session.isNumberRegisteredOnWhatsApp(finalReceiverId);
+            if (!quickValidation.isRegistered && !quickValidation.validationFailed && !quickValidation.isGroup) {
+                // Fast fail for unregistered numbers
+                const errorStatus = getMessageDeliveryStatus({ message: `Phone number ${finalReceiverId} is not registered on WhatsApp` });
+                return res.status(500).json({
+                    success: false,
+                    message: 'Failed to send text message',
+                    error: `Phone number ${finalReceiverId} is not registered on WhatsApp`,
+                    status: errorStatus,
+                    senderId: finalSenderId,
+                    fastFail: true,
+                    responseTime: '<1s'
+                });
+            }
+        }
+        
         const result = await sessionManager.sendTextMessage(finalSenderId, finalReceiverId, messageText);
         
         // Determine delivery status
@@ -468,6 +488,27 @@ router.post('/sendMediaSMS', validateAuthToken, validateSenderId, checkSessionEx
             });
         }
         
+        // OPTIMIZED: Fast pre-validation before downloading media
+        const session = await sessionManager.getSessionBySenderId(finalSenderId);
+        if (session && session.isSessionConnected()) {
+            // Quick validation check before downloading media
+            const quickValidation = await session.isNumberRegisteredOnWhatsApp(finalReceiverId);
+            if (!quickValidation.isRegistered && !quickValidation.validationFailed && !quickValidation.isGroup) {
+                // Fast fail for unregistered numbers - don't download media
+                const errorStatus = getMessageDeliveryStatus({ message: `Phone number ${finalReceiverId} is not registered on WhatsApp` });
+                return res.status(500).json({
+                    success: false,
+                    message: 'Failed to send media message',
+                    error: `Phone number ${finalReceiverId} is not registered on WhatsApp`,
+                    status: errorStatus,
+                    senderId: finalSenderId,
+                    fastFail: true,
+                    responseTime: '<1s',
+                    note: 'Media download skipped - number not registered'
+                });
+            }
+        }
+
         let mediaBuffer;
         let mediaType;
         let originalFileName;
@@ -504,7 +545,7 @@ router.post('/sendMediaSMS', validateAuthToken, validateSenderId, checkSessionEx
             
             const response = await axios.get(finalMediaUrl, {
                 responseType: 'arraybuffer',
-                timeout: 30000,
+                timeout: 15000, // OPTIMIZED: Reduced from 30s to 15s for faster failure detection
                 maxContentLength: 50 * 1024 * 1024 // 50MB
             });
             

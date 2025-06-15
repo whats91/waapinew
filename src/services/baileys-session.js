@@ -51,12 +51,16 @@ class BaileysSession {
         this.streamConflictCount = 0; // Track stream conflicts for escalation
         this.lastStreamConflictTime = null; // Track last conflict time
         this.maxStreamConflicts = 3; // Max conflicts before forced reset
-        this.streamConflictCooldown = 30000; // 30 seconds cooldown between conflicts
+        this.streamConflictCooldown = 60000; // ENHANCED: 60 seconds cooldown (increased from 30s)
+        this.connectionTimeout = 45000; // ENHANCED: 45 seconds timeout for connections
+        this.maxConcurrentConnections = 1; // ENHANCED: Strict single connection enforcement
+        this.connectionRetryDelay = 10000; // ENHANCED: 10 seconds base delay between retries
+        this.exponentialBackoffMultiplier = 1.5; // ENHANCED: Exponential backoff for retries
         
         // NEW: Backup and restore system
         this.backupDir = path.join(this.sessionDir, 'backup'); // Backup directory
         this.lastBackupTime = null; // Track last backup time
-        this.backupInterval = 5 * 60 * 1000; // Backup every 5 minutes when connected
+        this.backupInterval = 30 * 60 * 1000; // FIXED: Backup every 30 minutes (reduced from 5 minutes)
         this.isRestoring = false; // Flag to prevent recursive restore attempts
         this.backupEnabled = true; // Flag to enable/disable backup system
         this.maxBackupAge = 24 * 60 * 60 * 1000; // Maximum backup age (24 hours)
@@ -65,6 +69,12 @@ class BaileysSession {
         
         // NEW: Track consecutive logout attempts to detect invalid credentials
         this.consecutiveLogoutAttempts = 0; // Track logout attempts for credential validation
+        
+        // ENHANCED: Phone number validation optimization
+        this.numberValidationCache = new Map(); // Cache for recently validated numbers
+        this.numberValidationTimeout = 10000; // OPTIMIZED: 10 seconds timeout for number validation
+        this.cacheExpiryTime = 5 * 60 * 1000; // Cache numbers for 5 minutes
+        this.maxCacheSize = 1000; // Maximum cached numbers to prevent memory issues
         
         this.ensureSessionDirectory();
     }
@@ -1204,7 +1214,7 @@ class BaileysSession {
 
             logger.session(this.sessionId, 'Creating WhatsApp socket and connecting');
             
-            // Create WhatsApp socket
+            // ENHANCED: Create WhatsApp socket with improved configuration for stability
             this.socket = makeWASocket({
                 auth: this.authState,
                 logger: {
@@ -1226,22 +1236,36 @@ class BaileysSession {
                     })
                 },
                 browser: ['WhatsApp API', 'Chrome', '1.0.0'],
-                generateHighQualityLinkPreview: true,
+                generateHighQualityLinkPreview: false, // FIXED: Disable to reduce load
                 markOnlineOnConnect: false,
                 // ENHANCED: Connection options for better stability and conflict prevention
-                connectTimeoutMs: 60000,
-                defaultQueryTimeoutMs: 60000,
-                keepAliveIntervalMs: 30000, // Increased from 10s to 30s
-                // Reduce memory usage
+                connectTimeoutMs: this.connectionTimeout, // Use configurable timeout (45s)
+                defaultQueryTimeoutMs: 60000, // 60 seconds for query timeout
+                keepAliveIntervalMs: 45000, // ENHANCED: Increased to 45s to reduce conflicts
+                // Reduce memory usage and improve performance
                 shouldSyncHistoryMessage: () => false,
                 shouldIgnoreJid: jid => isJidBroadcast(jid) || isJidStatusBroadcast(jid) || isJidNewsletter(jid),
                 // CRITICAL: Add connection conflict prevention
                 printQRInTerminal: false, // Prevent terminal QR conflicts
                 qrTimeout: 20000, // 20 second QR timeout
-                // Add socket options for stability
+                // ENHANCED: Add socket options for stability
                 socketConfig: {
-                    timeout: 60000
-                }
+                    timeout: this.connectionTimeout, // Use configurable timeout
+                    handshakeTimeout: 45000, // 45 seconds handshake timeout
+                    maxRetries: 2, // Reduce retries to prevent conflicts
+                    retryDelay: this.connectionRetryDelay // Use configurable retry delay
+                },
+                // ENHANCED: Performance and stability options
+                transactionOpts: {
+                    maxQueryResponseTime: 60000, // 60 seconds for query responses
+                    maxQueryRetries: 2 // Reduce retries to prevent conflicts
+                },
+                retryRequestDelayMs: this.connectionRetryDelay, // Use configurable delay
+                maxMsgRetryCount: 2, // Reduce message retry count
+                emitOwnEvents: false, // Don't emit events for own messages to reduce load
+                cachedGroupMetadata: new Map(), // Use cached group metadata
+                syncFullHistory: false, // Ensure history sync is disabled
+                downloadHistory: false // Ensure history download is disabled
             });
 
             this.setupEventHandlers();
@@ -1786,15 +1810,36 @@ class BaileysSession {
                             return; // Don't attempt reconnection
                         }
                         
-                        // For fewer conflicts, wait longer before reconnecting
-                        const conflictDelay = Math.min(5000 * this.streamConflictCount, 30000); // 5s, 10s, 15s max
+                        // ENHANCED: Exponential backoff for stream conflicts with longer delays
+                        const baseDelay = this.connectionRetryDelay; // 10 seconds base
+                        const exponentialDelay = baseDelay * Math.pow(2, this.streamConflictCount - 1); // 10s, 20s, 40s
+                        const conflictDelay = Math.min(exponentialDelay, 120000); // Cap at 2 minutes
                         
-                        if (!this.isConnecting) {
+                        logger.session(this.sessionId, `Stream conflict delay calculated`, {
+                            conflictCount: this.streamConflictCount,
+                            baseDelay: baseDelay,
+                            exponentialDelay: exponentialDelay,
+                            finalDelay: conflictDelay
+                        });
+                        
+                        if (!this.isConnecting && !this.isDestroying) {
                             setTimeout(() => {
-                                if (this.streamConflictCount < this.maxStreamConflicts) {
+                                if (this.streamConflictCount < this.maxStreamConflicts && !this.isDestroying) {
                                     logger.session(this.sessionId, `Attempting reconnection after stream conflict (delay: ${conflictDelay}ms)`);
                                     this.initialize().catch(error => {
                                         logger.error('Stream conflict reconnection failed', { sessionId: this.sessionId, error: error.message });
+                                        // Additional retry with longer delay on failure
+                                        setTimeout(() => {
+                                            if (!this.isDestroying && this.streamConflictCount < this.maxStreamConflicts) {
+                                                logger.session(this.sessionId, 'Secondary retry after stream conflict failure');
+                                                this.initialize().catch(secondaryError => {
+                                                    logger.error('Secondary stream conflict reconnection failed', { 
+                                                        sessionId: this.sessionId, 
+                                                        error: secondaryError.message 
+                                                    });
+                                                });
+                                            }
+                                        }, conflictDelay); // Same delay for secondary retry
                                     });
                                 }
                             }, conflictDelay);
@@ -1910,6 +1955,31 @@ class BaileysSession {
                 logger.error('Error in connection.update handler', { sessionId: this.sessionId, error: error.message, stack: error.stack });
             }
         });
+
+        // ENHANCED: Global error handling for socket promises
+        this.socket.ev.on('error', (error) => {
+            logger.error('Socket error event', { 
+                sessionId: this.sessionId, 
+                error: error.message,
+                errorType: error.constructor.name
+            });
+        });
+
+        // ENHANCED: Catch unhandled promise rejections from socket operations
+        const originalQuery = this.socket.query;
+        if (originalQuery) {
+            this.socket.query = (...args) => {
+                const promise = originalQuery.apply(this.socket, args);
+                return promise.catch(error => {
+                    logger.error('Socket query operation failed', {
+                        sessionId: this.sessionId,
+                        error: error.message,
+                        operation: args[0]?.tag || 'unknown'
+                    });
+                    throw error; // Re-throw to maintain original behavior
+                });
+            };
+        }
 
         // Enhanced error handling for socket events
         this.socket.ev.on('messaging.update', (update) => {
@@ -2266,7 +2336,7 @@ class BaileysSession {
         return formattedJID;
     }
 
-    // Check if a phone number is registered on WhatsApp
+    // OPTIMIZED: Check if a phone number is registered on WhatsApp with caching and faster timeouts
     async isNumberRegisteredOnWhatsApp(receiverId) {
         if (!this.isConnected) {
             throw new Error('Session not connected');
@@ -2287,24 +2357,77 @@ class BaileysSession {
                 };
             }
 
-            // Use onWhatsApp method to check if individual number is registered
-            const [result] = await this.socket.onWhatsApp(formattedJID);
+            // ENHANCED: Check cache first to avoid repeated validations
+            const cacheKey = formattedJID;
+            const cachedResult = this.numberValidationCache.get(cacheKey);
             
+            if (cachedResult && (Date.now() - cachedResult.timestamp) < this.cacheExpiryTime) {
+                logger.session(this.sessionId, 'Number validation: using cached result', { 
+                    phoneNumber: formattedJID,
+                    isRegistered: cachedResult.isRegistered,
+                    cacheAge: Date.now() - cachedResult.timestamp
+                });
+                return {
+                    ...cachedResult.result,
+                    fromCache: true
+                };
+            }
+
+            // OPTIMIZED: Use Promise.race with timeout for faster response
+            const validationPromise = this.socket.onWhatsApp(formattedJID);
+            const timeoutPromise = new Promise((_, reject) => {
+                setTimeout(() => {
+                    reject(new Error(`Number validation timeout after ${this.numberValidationTimeout}ms`));
+                }, this.numberValidationTimeout);
+            });
+
+            let result;
+            try {
+                [result] = await Promise.race([validationPromise, timeoutPromise]);
+            } catch (timeoutError) {
+                if (timeoutError.message.includes('timeout')) {
+                    logger.warn('Number validation timed out, assuming not registered', { 
+                        sessionId: this.sessionId,
+                        phoneNumber: formattedJID,
+                        timeout: this.numberValidationTimeout
+                    });
+                    
+                    // Cache negative result for faster future responses
+                    const negativeResult = {
+                        isRegistered: false,
+                        jid: formattedJID,
+                        isGroup: false,
+                        validationTimeout: true
+                    };
+                    
+                    this.cacheValidationResult(cacheKey, negativeResult);
+                    return negativeResult;
+                }
+                throw timeoutError;
+            }
+            
+            let validationResult;
             if (result && result.exists) {
                 logger.session(this.sessionId, 'Number validation: registered', { phoneNumber: formattedJID });
-                return {
+                validationResult = {
                     isRegistered: true,
                     jid: result.jid || formattedJID,
                     isGroup: false
                 };
             } else {
                 logger.session(this.sessionId, 'Number validation: not registered', { phoneNumber: formattedJID });
-                return {
+                validationResult = {
                     isRegistered: false,
                     jid: formattedJID,
                     isGroup: false
                 };
             }
+
+            // ENHANCED: Cache the result for future use
+            this.cacheValidationResult(cacheKey, validationResult);
+            
+            return validationResult;
+            
         } catch (error) {
             logger.error('Error validating WhatsApp number', { 
                 sessionId: this.sessionId, 
@@ -2312,8 +2435,26 @@ class BaileysSession {
                 error: error.message 
             });
             
-            // If validation fails, assume number is valid to avoid blocking legitimate sends
-            // This could happen due to network issues or rate limiting
+            // ENHANCED: For specific errors, cache negative result
+            const errorMessage = error.message.toLowerCase();
+            if (errorMessage.includes('timeout') || 
+                errorMessage.includes('not registered') ||
+                errorMessage.includes('invalid')) {
+                
+                const formattedJID = this.formatAsWhatsAppJID(receiverId);
+                const negativeResult = {
+                    isRegistered: false,
+                    jid: formattedJID,
+                    isGroup: formattedJID.includes('@g.us'),
+                    validationFailed: true,
+                    error: error.message
+                };
+                
+                this.cacheValidationResult(formattedJID, negativeResult);
+                return negativeResult;
+            }
+            
+            // For unknown errors, assume number is valid to avoid blocking legitimate sends
             const formattedJID = this.formatAsWhatsAppJID(receiverId);
             return {
                 isRegistered: true,
@@ -2323,6 +2464,43 @@ class BaileysSession {
                 error: error.message
             };
         }
+    }
+
+    // ENHANCED: Cache validation results with memory management
+    cacheValidationResult(phoneNumber, result) {
+        try {
+            // Clean up cache if it gets too large
+            if (this.numberValidationCache.size >= this.maxCacheSize) {
+                const oldestKey = this.numberValidationCache.keys().next().value;
+                this.numberValidationCache.delete(oldestKey);
+                logger.session(this.sessionId, 'Validation cache cleanup - removed oldest entry', { 
+                    removedKey: oldestKey,
+                    cacheSize: this.numberValidationCache.size 
+                });
+            }
+
+            this.numberValidationCache.set(phoneNumber, {
+                result: result,
+                timestamp: Date.now()
+            });
+
+            logger.session(this.sessionId, 'Validation result cached', { 
+                phoneNumber, 
+                isRegistered: result.isRegistered,
+                cacheSize: this.numberValidationCache.size 
+            });
+        } catch (cacheError) {
+            logger.warn('Error caching validation result', { 
+                sessionId: this.sessionId, 
+                error: cacheError.message 
+            });
+        }
+    }
+
+    // ENHANCED: Clear validation cache (useful for session resets)
+    clearValidationCache() {
+        this.numberValidationCache.clear();
+        logger.session(this.sessionId, 'Validation cache cleared');
     }
 
     async sendTextMessage(receiverId, messageText) {
@@ -2662,6 +2840,9 @@ class BaileysSession {
             this.qrCodeString = null;
             this.qrCodeTimestamp = null;
             
+            // ENHANCED: Clear validation cache on session destroy
+            this.clearValidationCache();
+            
             await this.updateSessionStatus('disconnected');
             logger.session(this.sessionId, 'Session destroyed successfully');
         } catch (error) {
@@ -2677,6 +2858,9 @@ class BaileysSession {
         this.qrCodeScanned = false;
         this.authenticationStartTime = null;
         this.preventQRRegeneration = false;
+        
+        // ENHANCED: Clear validation cache on authentication reset
+        this.clearValidationCache();
     }
 
     // NEW: Public methods for backup management

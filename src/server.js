@@ -203,31 +203,61 @@ process.on('uncaughtException', (error) => {
 
 // Handle unhandled promise rejections
 process.on('unhandledRejection', (reason, promise) => {
-    logger.error('Unhandled Rejection', { 
-        reason: reason?.message || reason, 
-        stack: reason?.stack,
-        name: reason?.name,
-        code: reason?.code,
-        promise: promise.toString()
+    logger.error('Unhandled Rejection', {
+        name: reason?.name || 'Unknown',
+        message: reason?.message || String(reason),
+        stack: reason?.stack || 'No stack trace',
+        promise: promise.constructor.name
     });
+    
     console.error('Unhandled Rejection at:', promise, 'reason:', reason);
     
-    // Check if it's a WebSocket related error that we can ignore
-    const isWebSocketError = reason?.message?.includes('WebSocket was closed') || 
-                            reason?.message?.includes('socket hang up') ||
-                            reason?.message?.includes('ECONNRESET');
-    
-    if (isWebSocketError) {
-        logger.warn('WebSocket related error caught, continuing operation', { 
-            error: reason?.message 
-        });
-        return; // Don't exit for WebSocket errors
+    // ENHANCED: Better error handling based on error type
+    if (reason && reason.message) {
+        const errorMessage = reason.message.toLowerCase();
+        
+        // Stream conflict or timeout errors - usually recoverable
+        if (errorMessage.includes('timed out') || 
+            errorMessage.includes('stream errored') ||
+            errorMessage.includes('conflict') ||
+            errorMessage.includes('connection closed')) {
+            logger.warn('Recoverable error detected, continuing operation', {
+                errorType: 'connection_issue',
+                message: reason.message
+            });
+            return; // Don't exit for these errors
+        }
+        
+        // Authentication or file system errors - usually recoverable
+        if (errorMessage.includes('authentication') ||
+            errorMessage.includes('auth') ||
+            errorMessage.includes('enoent') ||
+            errorMessage.includes('permission denied')) {
+            logger.warn('Authentication or file system error, continuing operation', {
+                errorType: 'auth_or_fs_issue',
+                message: reason.message
+            });
+            return; // Don't exit for these errors
+        }
     }
     
-    // For debugging, let's not exit immediately but log the error
+    // Handle different environment behavior
     if (process.env.NODE_ENV === 'production') {
-        logger.error('Exiting due to unhandled rejection in production');
-        process.exit(1);
+        // ENHANCED: More graceful error handling in production
+        logger.error('Critical unhandled rejection in production, attempting recovery');
+        
+        // Try to perform cleanup before potential exit
+        if (global.sessionManager && typeof global.sessionManager.cleanup === 'function') {
+            global.sessionManager.cleanup().catch(cleanupError => {
+                logger.error('Error during emergency cleanup', { error: cleanupError.message });
+            });
+        }
+        
+        // Don't exit immediately - give time for recovery
+        setTimeout(() => {
+            logger.error('Delayed exit after unhandled rejection cleanup attempt');
+            process.exit(1);
+        }, 5000); // 5 second delay
     } else {
         logger.warn('Unhandled rejection in development mode, continuing...');
     }

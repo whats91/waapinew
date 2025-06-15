@@ -14,11 +14,11 @@ class SessionManager {
         this.maxSessions = parseInt(process.env.MAX_CONCURRENT_SESSIONS) || 100;
         this.isInitialized = false;
         
-        // Auto-refresh configuration from environment variables
-        this.sessionHealthCheckInterval = parseInt(process.env.SESSION_HEALTH_CHECK_INTERVAL) || 5 * 60 * 1000; // Default 5 minutes
+        // ENHANCED: Auto-refresh configuration with longer intervals for stability
+        this.sessionHealthCheckInterval = parseInt(process.env.SESSION_HEALTH_CHECK_INTERVAL) || 10 * 60 * 1000; // ENHANCED: Default 10 minutes (increased from 5)
         this.maxSessionIdleTime = parseInt(process.env.MAX_SESSION_IDLE_TIME) || 30 * 60 * 1000; // Default 30 minutes
         this.autoRefreshEnabled = process.env.AUTO_REFRESH_ENABLED !== 'false'; // Default true
-        this.sessionMaxRetries = parseInt(process.env.SESSION_MAX_RETRIES) || 5; // Default 5 retries
+        this.sessionMaxRetries = parseInt(process.env.SESSION_MAX_RETRIES) || 3; // ENHANCED: Reduced retries from 5 to 3
         this.healthCheckTimer = null;
         
         // CRITICAL: Session usage and rate limiting
@@ -27,10 +27,10 @@ class SessionManager {
         this.maxSessionUsagePerMinute = parseInt(process.env.MAX_SESSION_USAGE_PER_MINUTE) || 20; // Max 20 messages per minute per session
         this.sessionCooldownPeriod = parseInt(process.env.SESSION_COOLDOWN_PERIOD) || 60000; // 1 minute cooldown
         
-        // NEW: Periodic health monitor
+        // ENHANCED: Periodic health monitor with longer intervals
         this.healthCheckInterval = null;
         this.healthCheckEnabled = true;
-        this.healthCheckIntervalTime = 2 * 60 * 1000; // 2 minutes
+        this.healthCheckIntervalTime = 15 * 60 * 1000; // ENHANCED: 15 minutes (increased from 2 minutes)
         
         // Initialize existing sessions asynchronously but safely
         this.initializeExistingSessions().catch(error => {
@@ -738,10 +738,10 @@ class SessionManager {
             if (!session.isSessionConnected()) {
                 logger.info('Session not connected, attempting auto-reconnect', { senderId });
                 
-                // Auto-reconnect with timeout
+                // OPTIMIZED: Auto-reconnect with faster timeout
                 const reconnectPromise = this.autoReconnectSession(senderId);
                 const timeoutPromise = new Promise((_, reject) => 
-                    setTimeout(() => reject(new Error('Auto-reconnect timeout')), 15000) // 15 second timeout
+                    setTimeout(() => reject(new Error('Auto-reconnect timeout')), 10000) // OPTIMIZED: 10 second timeout (reduced from 15s)
                 );
                 
                 try {
@@ -772,10 +772,10 @@ class SessionManager {
                 }
             }
 
-            // ENHANCED: Wait for connection with reduced timeout
+            // OPTIMIZED: Fast connection check with early exit for unregistered numbers
             logger.info('Session not connected, waiting for connection', { senderId });
             try {
-                await this.waitForConnection(session, 15000); // Reduced from 30s to 15s
+                await this.waitForConnection(session, 8000); // OPTIMIZED: Reduced to 8s for faster response
                 logger.info('Session connected, sending message', { senderId });
             } catch (waitError) {
                 logger.warn('Session connection wait timed out', { senderId });
@@ -786,13 +786,13 @@ class SessionManager {
                     throw new Error('Session requires fresh QR scan due to connection timeout. Please generate a new QR code.');
                 }
                 
-                throw new Error('Connection timeout - session failed to connect within 15 seconds');
+                throw new Error('Connection timeout - session failed to connect within 8 seconds');
             }
 
-            // ENHANCED: Send message with timeout protection
+            // OPTIMIZED: Send message with faster timeout for quick failure detection
             const sendPromise = session.sendTextMessage(receiverId, messageText);
             const sendTimeoutPromise = new Promise((_, reject) => 
-                setTimeout(() => reject(new Error('Message send timeout')), 20000) // 20 second timeout
+                setTimeout(() => reject(new Error('Message send timeout')), 12000) // OPTIMIZED: 12 second timeout (reduced from 20s)
             );
             
             const result = await Promise.race([sendPromise, sendTimeoutPromise]);
@@ -817,7 +817,7 @@ class SessionManager {
                 try {
                     const retryReconnectPromise = this.autoReconnectSession(senderId);
                     const retryTimeoutPromise = new Promise((_, reject) => 
-                        setTimeout(() => reject(new Error('Retry auto-reconnect timeout')), 10000) // 10 second timeout for retry
+                        setTimeout(() => reject(new Error('Retry auto-reconnect timeout')), 6000) // OPTIMIZED: 6 second timeout for retry (reduced from 10s)
                     );
                     
                     await Promise.race([retryReconnectPromise, retryTimeoutPromise]);
@@ -860,19 +860,19 @@ class SessionManager {
                     throw new Error(`Failed to create session for senderId: ${senderId}`);
                 }
                 
-                // Wait for connection if not connected
+                // OPTIMIZED: Wait for connection with faster timeout
                 if (!newSession.isSessionConnected()) {
                     logger.info('Waiting for new session to connect', { senderId });
-                    await this.waitForConnection(newSession, 30000);
+                    await this.waitForConnection(newSession, 15000); // OPTIMIZED: Reduced from 30s to 15s
                 }
                 
                 return await newSession.sendMediaMessage(receiverId, mediaBuffer, mediaType, caption, fileName);
             }
             
-            // Session exists - check if it's connecting
+            // OPTIMIZED: Session exists - check if it's connecting with faster timeout
             if (session.isConnecting) {
                 logger.info('Session is connecting, waiting for connection', { senderId });
-                await this.waitForConnection(session, 30000);
+                await this.waitForConnection(session, 15000); // OPTIMIZED: Reduced from 30s to 15s
                 return await session.sendMediaMessage(receiverId, mediaBuffer, mediaType, caption, fileName);
             }
             
@@ -909,9 +909,9 @@ class SessionManager {
                 throw new Error(`Unable to recover session for senderId: ${senderId}`);
             }
             
-            // Wait for connection after recovery
+            // OPTIMIZED: Wait for connection after recovery with faster timeout
             if (!recoveredSession.isSessionConnected()) {
-                await this.waitForConnection(recoveredSession, 30000);
+                await this.waitForConnection(recoveredSession, 15000); // OPTIMIZED: Reduced from 30s to 15s
             }
             
             return await recoveredSession.sendMediaMessage(receiverId, mediaBuffer, mediaType, caption, fileName);
@@ -943,7 +943,7 @@ class SessionManager {
                     if (freshSession && freshSession.isSessionConnected()) {
                         return await freshSession.sendMediaMessage(receiverId, mediaBuffer, mediaType, caption, fileName);
                     } else if (freshSession) {
-                        await this.waitForConnection(freshSession, 30000);
+                        await this.waitForConnection(freshSession, 15000); // OPTIMIZED: Reduced from 30s to 15s
                         return await freshSession.sendMediaMessage(receiverId, mediaBuffer, mediaType, caption, fileName);
                     }
                 } catch (retryError) {
