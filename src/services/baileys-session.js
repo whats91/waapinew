@@ -5,7 +5,8 @@ const {
     isJidBroadcast,
     isJidStatusBroadcast,
     isJidNewsletter,
-    proto
+    proto,
+    makeCacheableSignalKeyStore
 } = require('@whiskeysockets/baileys');
 const QRCode = require('qrcode');
 const path = require('path');
@@ -75,6 +76,10 @@ class BaileysSession {
         this.numberValidationTimeout = 10000; // OPTIMIZED: 10 seconds timeout for number validation
         this.cacheExpiryTime = 5 * 60 * 1000; // Cache numbers for 5 minutes
         this.maxCacheSize = 1000; // Maximum cached numbers to prevent memory issues
+        
+        // FIXED: Initialize group metadata cache for proper group message support
+        this.groupMetadataCache = new Map(); // Cache for group metadata
+        this.groupMetadataCacheExpiry = 5 * 60 * 1000; // Cache group metadata for 5 minutes
         
         this.ensureSessionDirectory();
     }
@@ -1002,9 +1007,39 @@ class BaileysSession {
                 }
             }
             
+            // CRITICAL FIX: Check and fix credential file structure before loading
+            if (fs.existsSync(this.authDir) && fs.readdirSync(this.authDir).length > 0) {
+                logger.session(this.sessionId, 'Checking credential file structure for compatibility');
+                await this.fixCredentialFileStructure();
+            }
+            
             // Load authentication state from auth subdirectory
             const { state, saveCreds } = await useMultiFileAuthState(this.authDir);
-            this.authState = state;
+            
+            // CRITICAL FIX: Use makeCacheableSignalKeyStore like the old project for compatibility
+            this.authState = {
+                creds: state.creds,
+                keys: makeCacheableSignalKeyStore(state.keys, {
+                    level: 'silent',
+                    trace: () => {},
+                    debug: () => {},
+                    info: () => {},
+                    warn: () => {},
+                    error: () => {},
+                    fatal: () => {},
+                    child: () => ({
+                        level: 'silent',
+                        trace: () => {},
+                        debug: () => {},
+                        info: () => {},
+                        warn: () => {},
+                        error: () => {},
+                        fatal: () => {},
+                        child: () => ({})
+                    })
+                })
+            };
+            
             this.saveCreds = saveCreds;
             this.isInitialized = true;
 
@@ -1022,7 +1057,31 @@ class BaileysSession {
                         logger.session(this.sessionId, 'Backup restore successful, retrying initialization');
                         // Retry initialization after successful restore
                         const { state, saveCreds } = await useMultiFileAuthState(this.authDir);
-                        this.authState = state;
+                        
+                        // CRITICAL FIX: Use makeCacheableSignalKeyStore like the old project for compatibility
+                        this.authState = {
+                            creds: state.creds,
+                            keys: makeCacheableSignalKeyStore(state.keys, {
+                                level: 'silent',
+                                trace: () => {},
+                                debug: () => {},
+                                info: () => {},
+                                warn: () => {},
+                                error: () => {},
+                                fatal: () => {},
+                                child: () => ({
+                                    level: 'silent',
+                                    trace: () => {},
+                                    debug: () => {},
+                                    info: () => {},
+                                    warn: () => {},
+                                    error: () => {},
+                                    fatal: () => {},
+                                    child: () => ({})
+                                })
+                            })
+                        };
+                        
                         this.saveCreds = saveCreds;
                         this.isInitialized = true;
                         logger.session(this.sessionId, 'Session initialized successfully after backup restore');
@@ -1214,7 +1273,7 @@ class BaileysSession {
 
             logger.session(this.sessionId, 'Creating WhatsApp socket and connecting');
             
-            // ENHANCED: Create WhatsApp socket with improved configuration for stability
+            // FIXED: Create WhatsApp socket with configuration matching the working old project
             this.socket = makeWASocket({
                 auth: this.authState,
                 logger: {
@@ -1232,40 +1291,46 @@ class BaileysSession {
                         info: () => {},
                         warn: () => {},
                         error: () => {},
-                        fatal: () => {}
+                        fatal: () => {},
+                        child: () => ({})
                     })
                 },
-                browser: ['WhatsApp API', 'Chrome', '1.0.0'],
-                generateHighQualityLinkPreview: false, // FIXED: Disable to reduce load
-                markOnlineOnConnect: false,
-                // ENHANCED: Connection options for better stability and conflict prevention
-                connectTimeoutMs: this.connectionTimeout, // Use configurable timeout (45s)
-                defaultQueryTimeoutMs: 60000, // 60 seconds for query timeout
-                keepAliveIntervalMs: 45000, // ENHANCED: Increased to 45s to reduce conflicts
-                // Reduce memory usage and improve performance
+                // CRITICAL FIX: Use exact same browser config as working old project
+                mobile: false,
+                printQRInTerminal: false,
+                syncFullHistory: false, // This can cause issues in v6.7.17, set to false
+                markOnlineOnConnect: true,
+                generateHighQualityLinkPreview: true,
+                // CRITICAL FIX: Use same timeout settings as working project
+                defaultQueryTimeoutMs: 30000, // 30 seconds instead of 60
+                connectTimeoutMs: this.connectionTimeout,
+                keepAliveIntervalMs: 25000, // Use 25s like working project
+                retryRequestDelayMs: 1000, // Use 1s like working project
+                maxMsgRetryCount: 3, // Use 3 like working project
+                fireInitQueries: true,
+                // CRITICAL FIX: Enable emitOwnEvents so sender can see their own messages
+                emitOwnEvents: true, // MUST be true for sender to see their own messages
+                // Performance and stability options matching working project
                 shouldSyncHistoryMessage: () => false,
                 shouldIgnoreJid: jid => isJidBroadcast(jid) || isJidStatusBroadcast(jid) || isJidNewsletter(jid),
-                // CRITICAL: Add connection conflict prevention
-                printQRInTerminal: false, // Prevent terminal QR conflicts
                 qrTimeout: 20000, // 20 second QR timeout
-                // ENHANCED: Add socket options for stability
-                socketConfig: {
-                    timeout: this.connectionTimeout, // Use configurable timeout
-                    handshakeTimeout: 45000, // 45 seconds handshake timeout
-                    maxRetries: 2, // Reduce retries to prevent conflicts
-                    retryDelay: this.connectionRetryDelay // Use configurable retry delay
-                },
-                // ENHANCED: Performance and stability options
-                transactionOpts: {
-                    maxQueryResponseTime: 60000, // 60 seconds for query responses
-                    maxQueryRetries: 2 // Reduce retries to prevent conflicts
-                },
-                retryRequestDelayMs: this.connectionRetryDelay, // Use configurable delay
-                maxMsgRetryCount: 2, // Reduce message retry count
-                emitOwnEvents: false, // Don't emit events for own messages to reduce load
-                cachedGroupMetadata: new Map(), // Use cached group metadata
-                syncFullHistory: false, // Ensure history sync is disabled
-                downloadHistory: false // Ensure history download is disabled
+                // FIXED: Implement cachedGroupMetadata as a function for group message support
+                cachedGroupMetadata: async (jid) => {
+                    try {
+                        // Check if we have the group metadata cached
+                        if (this.groupMetadataCache && this.groupMetadataCache.has(jid)) {
+                            const cached = this.groupMetadataCache.get(jid);
+                            // Return cached data if it's less than 5 minutes old
+                            if (Date.now() - cached.timestamp < 300000) {
+                                return cached.metadata;
+                            }
+                        }
+                        return null; // Return null if not cached or expired
+                    } catch (error) {
+                        logger.warn('Error in cachedGroupMetadata', { sessionId: this.sessionId, jid, error: error.message });
+                        return null;
+                    }
+                }
             });
 
             this.setupEventHandlers();
@@ -2106,9 +2171,56 @@ class BaileysSession {
             try {
                 if (Array.isArray(updates)) {
                     logger.session(this.sessionId, 'Groups updated', { count: updates.length });
+                    
+                    // FIXED: Update group metadata cache when groups are updated
+                    updates.forEach(async (update) => {
+                        if (update.id) {
+                            try {
+                                const metadata = await this.socket.groupMetadata(update.id);
+                                this.groupMetadataCache.set(update.id, {
+                                    metadata: metadata,
+                                    timestamp: Date.now()
+                                });
+                                logger.session(this.sessionId, 'Cached group metadata', { groupId: update.id });
+                            } catch (metadataError) {
+                                logger.warn('Failed to cache group metadata', { 
+                                    sessionId: this.sessionId, 
+                                    groupId: update.id, 
+                                    error: metadataError.message 
+                                });
+                            }
+                        }
+                    });
                 }
             } catch (error) {
                 logger.error('Error handling groups update', { sessionId: this.sessionId, error: error.message });
+            }
+        });
+
+        // FIXED: Add group participants update handler for metadata caching
+        this.socket.ev.on('group-participants.update', async (event) => {
+            try {
+                if (event.id) {
+                    logger.session(this.sessionId, 'Group participants updated', { groupId: event.id });
+                    
+                    // Update group metadata cache when participants change
+                    try {
+                        const metadata = await this.socket.groupMetadata(event.id);
+                        this.groupMetadataCache.set(event.id, {
+                            metadata: metadata,
+                            timestamp: Date.now()
+                        });
+                        logger.session(this.sessionId, 'Updated group metadata cache after participant change', { groupId: event.id });
+                    } catch (metadataError) {
+                        logger.warn('Failed to update group metadata cache after participant change', { 
+                            sessionId: this.sessionId, 
+                            groupId: event.id, 
+                            error: metadataError.message 
+                        });
+                    }
+                }
+            } catch (error) {
+                logger.error('Error handling group participants update', { sessionId: this.sessionId, error: error.message });
             }
         });
 
@@ -2204,14 +2316,16 @@ class BaileysSession {
             // Extract message content
             const extractedContent = this.extractMessageContent(message);
             
-            // SIMPLIFIED LOGGING: Only log incoming messages with session ID and content
+            // ENHANCED LOGGING: Log both incoming AND outgoing messages for visibility
             if (isIncoming) {
                 console.log(`📥 [${this.sessionId}] Incoming: ${extractedContent.content || extractedContent.type}`);
+            } else if (isOutgoing) {
+                console.log(`📤 [${this.sessionId}] Outgoing: ${extractedContent.content || extractedContent.type}`);
             }
 
             const sessionData = await this.database.getSession(this.sessionId);
             
-            // Only process webhooks for INCOMING messages
+            // Process webhooks for INCOMING messages only (keep original logic for webhooks)
             if (isIncoming && sessionData && sessionData.webhook_status && sessionData.webhook_url) {
                 const messageData = {
                     sessionId: this.sessionId,
@@ -2248,7 +2362,7 @@ class BaileysSession {
                 }
             }
 
-            // Auto-read functionality (only for incoming messages)
+            // Auto-read functionality (only for incoming messages - keep original logic)
             if (isIncoming && sessionData && sessionData.auto_read) {
                 try {
                     await this.markMessageAsRead(message.key);
@@ -2960,6 +3074,112 @@ class BaileysSession {
     async restoreSessionFromBackup() {
         logger.session(this.sessionId, 'Legacy restore method called - using sequential restoration');
         return await this.restoreSessionFromBackupSequential();
+    }
+
+    // NEW: Fix credential files that are missing required fields
+    async fixCredentialFileStructure() {
+        try {
+            const credsPath = path.join(this.authDir, 'creds.json');
+            
+            if (!fs.existsSync(credsPath)) {
+                logger.session(this.sessionId, 'No credentials file found to fix');
+                return false;
+            }
+
+            const credsContent = fs.readFileSync(credsPath, 'utf8');
+            let creds;
+            
+            try {
+                creds = JSON.parse(credsContent);
+            } catch (parseError) {
+                logger.error('Failed to parse credentials file', { 
+                    sessionId: this.sessionId, 
+                    error: parseError.message 
+                });
+                return false;
+            }
+
+            let needsUpdate = false;
+            const updates = [];
+
+            // Check and fix missing fields based on working credential structure
+            
+            // 1. Check for myAppStateKeyId field
+            if (!creds.myAppStateKeyId) {
+                // Generate a new app state key ID in the format like "AAAAAOuj"
+                const keyId = 'AAAAA' + Math.random().toString(36).substring(2, 7);
+                creds.myAppStateKeyId = keyId;
+                needsUpdate = true;
+                updates.push('Added missing myAppStateKeyId');
+            }
+
+            // 2. Check for name field in me object
+            if (creds.me && !creds.me.name && creds.me.id) {
+                // Extract phone number from ID and use as name
+                const phoneNumber = creds.me.id.split(':')[0];
+                creds.me.name = phoneNumber;
+                needsUpdate = true;
+                updates.push('Added missing name field in me object');
+            }
+
+            // 3. Ensure accountSyncCounter exists
+            if (typeof creds.accountSyncCounter === 'undefined') {
+                creds.accountSyncCounter = 1;
+                needsUpdate = true;
+                updates.push('Added missing accountSyncCounter');
+            }
+
+            // 4. Ensure processedHistoryMessages exists
+            if (!Array.isArray(creds.processedHistoryMessages)) {
+                creds.processedHistoryMessages = [];
+                needsUpdate = true;
+                updates.push('Added missing processedHistoryMessages array');
+            }
+
+            // 5. Ensure accountSettings exists
+            if (!creds.accountSettings) {
+                creds.accountSettings = { unarchiveChats: false };
+                needsUpdate = true;
+                updates.push('Added missing accountSettings');
+            }
+
+            // 6. Ensure registered field exists
+            if (typeof creds.registered === 'undefined') {
+                creds.registered = false;
+                needsUpdate = true;
+                updates.push('Added missing registered field');
+            }
+
+            if (needsUpdate) {
+                // Create backup before updating
+                const backupPath = credsPath + '.backup.' + Date.now();
+                fs.copyFileSync(credsPath, backupPath);
+                
+                // Write updated credentials
+                fs.writeFileSync(credsPath, JSON.stringify(creds, null, 2));
+                
+                logger.session(this.sessionId, 'Credential file structure fixed', {
+                    updates: updates,
+                    backupCreated: backupPath
+                });
+                
+                console.log(`🔧 Fixed credential file for ${this.sessionId.substring(0, 8)}...`);
+                console.log(`   Updates: ${updates.join(', ')}`);
+                console.log(`   Backup: ${path.basename(backupPath)}`);
+                
+                return true;
+            } else {
+                logger.session(this.sessionId, 'Credential file structure is already correct');
+                return false;
+            }
+
+        } catch (error) {
+            logger.error('Error fixing credential file structure', { 
+                sessionId: this.sessionId, 
+                error: error.message 
+            });
+            return false;
+        }
     }
 }
 
