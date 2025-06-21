@@ -1,17 +1,194 @@
-[6:05:00 pm]INFO:Process output: Sending message 4204 to 919575370323
-[6:05:31 pm]ERROR:Process error: Error sending message: Request failed with status code 500
-Response data: {
-  "success": false,
-  "message": "Failed to send media message",
-  "error": "Phone number 919575370323 is not registered on WhatsApp",
-  "status": "not on WA",
-  "senderId": "919300035900"
-}
+0|server   | info: POST /api/getQRCode {"body":{"authToken":"[HIDDEN]","senderId":"917290907299"},"ip":"::ffff:127.0.0.1","service":"whatsapp-api","timestamp":"2025-06-20 09:49:54","userAgent":"axios/1.7.9"}
+0|server   | info: QR code requested {"endpoint":"/getQRCode","senderId":"917290907299","service":"whatsapp-api","timestamp":"2025-06-20 09:49:54","type":"api"}
+0|server   | info: API QR code requested {"senderId":"917290907299","service":"whatsapp-api","timestamp":"2025-06-20 09:49:54"}
+0|server   | info: Session already connected, no QR needed {"senderId":"917290907299","service":"whatsapp-api","timestamp":"2025-06-20 09:49:54"}
+0|server   | error: Error in getQRCodeForAPI {"error":"Session already connected. No QR code needed.","senderId":"917290907299","service":"whatsapp-api","timestamp":"2025-06-20 09:49:54"}
+0|server   | error: Error in /getQRCode {"error":"Session already connected. No QR code needed.","senderId":"917290907299","service":"whatsapp-api","timestamp":"2025-06-20 09:49:54"}
+0|server   | info: GET /api/stats {"ip":"::ffff:127.0.0.1","service":"whatsapp-api","timestamp":"2025-06-20 09:50:00","userAgent":"axios/1.7.9"}
+0|server   | info: POST /api/createSession {"body":{"adminId":100,"authToken":"[HIDDEN]","senderId":"919143236000","userId":934},"ip":"::ffff:127.0.0.1","service":"whatsapp-api","timestamp":"2025-06-20 09:50:03","userAgent":"axios/1.7.9"}
+0|server   | info: Session database entry created {"adminId":100,"service":"whatsapp-api","sessionId":"919143236000","timestamp":"2025-06-20 09:50:03","userId":"934"}
+0|server   | info: New session created with lazy initialization {"service":"whatsapp-api","sessionId":"919143236000","timestamp":"2025-06-20 09:50:03"}
+0|server   | info: Initializing Baileys session (lazy mode) {"service":"whatsapp-api","sessionId":"919143236000","timestamp":"2025-06-20 09:50:03","type":"session"}
+0|server   | info: No auth files found, checking for backup {"service":"whatsapp-api","sessionId":"919143236000","timestamp":"2025-06-20 09:50:03","type":"session"}
+0|server   | info: Baileys session initialized successfully (lazy mode) {"service":"whatsapp-api","sessionId":"919143236000","timestamp":"2025-06-20 09:50:03","type":"session"}
+0|server   | info: Session created and initialized {"service":"whatsapp-api","sessionId":"919143236000","timestamp":"2025-06-20 09:50:03"}
+0|server   | info: Session created {"adminId":100,"endpoint":"/createSession","service":"whatsapp-api","sessionId":"919143236000","timestamp":"2025-06-20 09:50:03","type":"api","userId":"934"}
 
-
-
-
-
-
-0|server  | error: Final recovery attempt also failed {"originalError":"Phone number 919575370323 is not registered on WhatsApp","retryError":"Connection timeout","senderId":"919300035900","service":"whatsapp-api","timestamp":"2025-06-15 12:35:31"}
-0|server  | error: Error in /sendMediaSMS {"error":"Phone number 919575370323 is not registered on WhatsApp","senderId":"919300035900","service":"whatsapp-api","timestamp":"2025-06-15 12:35:31"}
+0|server  | info: POST /api/migrateSession {"body":{},"ip":"::ffff:127.0.0.1","service":"whatsapp-api","timestamp":"2025-06-20 09:50:07","userAgent":"axios/1.7.7"}
+0|server  | info: Session migration requested {"endpoint":"/migrateSession","fileCount":1,"fileNames":["creds.json"],"senderId":"919143236000","service":"whatsapp-api","timestamp":"2025-06-20 09:50:07","type":"api"}
+0|server  | info: Credential file stored {"fileName":"creds.json","service":"whatsapp-api","sessionId":"919143236000","size":2338,"timestamp":"2025-06-20 09:50:07"}
+0|server  | info: Validation cache cleared {"service":"whatsapp-api","sessionId":"919143236000","timestamp":"2025-06-20 09:50:07","type":"session"}
+0|server  | info: Validation cache cleared {"service":"whatsapp-api","sessionId":"919143236000","timestamp":"2025-06-20 09:50:07","type":"session"}
+0|server  | info: Session destroyed successfully {"service":"whatsapp-api","sessionId":"919143236000","timestamp":"2025-06-20 09:50:07","type":"session"}
+0|server  | info: Active session destroyed for migration {"service":"whatsapp-api","sessionId":"919143236000","timestamp":"2025-06-20 09:50:07"}
+0|server  | info: Auto-reconnecting session {"service":"whatsapp-api","sessionId":"919143236000","timestamp":"2025-06-20 09:50:07"}
+0|server  | info: Validating session auth files before recovery {"service":"whatsapp-api","sessionId":"919143236000","timestamp":"2025-06-20 09:50:07"}
+0|server  | info: Auth file validation passed: creds.json {"service":"whatsapp-api","sessionId":"919143236000","timestamp":"2025-06-20 09:50:08","type":"session"}
+0|server  | info: Auth files validation passed {"service":"whatsapp-api","sessionId":"919143236000","timestamp":"2025-06-20 09:50:08"}
+0|server  | info: Valid authentication data found for session 919143236000 {"service":"whatsapp-api","timestamp":"2025-06-20 09:50:08"}
+0|server  | info: Session eligible for auto-reconnect (has authentication data) {"service":"whatsapp-api","sessionId":"919143236000","timestamp":"2025-06-20 09:50:08"}
+0|server  | info: Validation cache cleared {"service":"whatsapp-api","sessionId":"919143236000","timestamp":"2025-06-20 09:50:08","type":"session"}
+0|server  | info: Validation cache cleared {"service":"whatsapp-api","sessionId":"919143236000","timestamp":"2025-06-20 09:50:08","type":"session"}
+0|server  | info: Session destroyed successfully {"service":"whatsapp-api","sessionId":"919143236000","timestamp":"2025-06-20 09:50:08","type":"session"}
+0|server  | info: Initializing Baileys session (lazy mode) {"service":"whatsapp-api","sessionId":"919143236000","timestamp":"2025-06-20 09:50:09","type":"session"}
+0|server  | info: Checking credential file structure for compatibility {"service":"whatsapp-api","sessionId":"919143236000","timestamp":"2025-06-20 09:50:09","type":"session"}
+0|server  | info: Credential file structure is already correct {"service":"whatsapp-api","sessionId":"919143236000","timestamp":"2025-06-20 09:50:09","type":"session"}
+0|server  | info: Baileys session initialized successfully (lazy mode) {"service":"whatsapp-api","sessionId":"919143236000","timestamp":"2025-06-20 09:50:09","type":"session"}
+0|server  | info: Creating WhatsApp socket and connecting {"service":"whatsapp-api","sessionId":"919143236000","timestamp":"2025-06-20 09:50:09","type":"session"}
+0|server  | info: WhatsApp socket created and connection started {"service":"whatsapp-api","sessionId":"919143236000","timestamp":"2025-06-20 09:50:09","type":"session"}
+0|server  | info: Session auto-reconnected successfully {"service":"whatsapp-api","sessionId":"919143236000","timestamp":"2025-06-20 09:50:09"}
+0|server  | info: Session restarted with migrated credentials {"service":"whatsapp-api","sessionId":"919143236000","timestamp":"2025-06-20 09:50:09"}
+0|server  | 🔄 Connecting to WhatsApp... (Session: 91914323...)
+0|server  | info: Connecting to WhatsApp... {"service":"whatsapp-api","sessionId":"919143236000","timestamp":"2025-06-20 09:50:09","type":"session"}
+0|server  | info: Validation cache cleared {"service":"whatsapp-api","sessionId":"919143236000","timestamp":"2025-06-20 09:50:10","type":"session"}
+0|server  | 🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉
+0|server  | ✅ WHATSAPP SESSION CONNECTED SUCCESSFULLY!
+0|server  | 📱 Session ID: 91914323...
+0|server  | 🚀 Ready to send and receive messages
+0|server  | 🔄 Auto-refresh monitoring active
+0|server  | 🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉
+0|server  | info: Session connected successfully {"service":"whatsapp-api","sessionId":"919143236000","timestamp":"2025-06-20 09:50:10","type":"session"}
+0|server  | info: GET /api/sessions/user/905 {"ip":"::ffff:127.0.0.1","service":"whatsapp-api","timestamp":"2025-06-20 09:50:11","userAgent":"axios/1.7.9"}
+0|server  | info: Sessions requested for user {"endpoint":"/sessions/user/:userId","service":"whatsapp-api","timestamp":"2025-06-20 09:50:11","type":"api","userId":"905"}
+0|server  | info: POST /api/sendTextSMS {"body":{"authToken":"[HIDDEN]","messageText":"TEST","receiverId":"917000782082","senderId":"917290907299"},"ip":"::ffff:127.0.0.1","service":"whatsapp-api","timestamp":"2025-06-20 09:50:13","userAgent":"axios/1.7.9"}
+0|server  | info: Text message send requested {"endpoint":"/sendTextSMS","messageLength":4,"receiverId":"917000782082","senderId":"917290907299","service":"whatsapp-api","timestamp":"2025-06-20 09:50:13","type":"api"}
+0|server  | info: Number validation: registered {"phoneNumber":"917000782082@s.whatsapp.net","service":"whatsapp-api","sessionId":"917290907299","timestamp":"2025-06-20 09:50:14","type":"session"}
+0|server  | info: Validation result cached {"cacheSize":1,"isRegistered":true,"phoneNumber":"917000782082@s.whatsapp.net","service":"whatsapp-api","sessionId":"917290907299","timestamp":"2025-06-20 09:50:14","type":"session"}
+0|server  | info: Text message send requested {"endpoint":"/sendTextSMS","messageLength":4,"receiverId":"917000782082","senderId":"917290907299","service":"whatsapp-api","timestamp":"2025-06-20 09:50:14"}
+0|server  | info: Session not connected, waiting for connection {"senderId":"917290907299","service":"whatsapp-api","timestamp":"2025-06-20 09:50:14"}
+0|server  | info: Session connected, sending message {"senderId":"917290907299","service":"whatsapp-api","timestamp":"2025-06-20 09:50:14"}
+0|server  | info: Number validation: using cached result {"cacheAge":9,"phoneNumber":"917000782082@s.whatsapp.net","service":"whatsapp-api","sessionId":"917290907299","timestamp":"2025-06-20 09:50:14","type":"session"}
+0|server  | info: Text message sent {"isGroup":false,"receiverId":"917000782082@s.whatsapp.net","service":"whatsapp-api","sessionId":"917290907299","timestamp":"2025-06-20 09:50:14","type":"session","validationPassed":true}
+0|server  | info: Text message sent successfully {"receiverId":"917000782082","senderId":"917290907299","service":"whatsapp-api","timestamp":"2025-06-20 09:50:14"}
+0|server  | 💓 Session Heartbeat [917290907299]: {
+0|server  |   connected: true,
+0|server  |   socketExists: true,
+0|server  |   socketReadyState: undefined,
+0|server  |   hasUser: true,
+0|server  |   timestamp: '2025-06-20T09:50:14.964Z'
+0|server  | }
+0|server  | info: Session connected but not stable enough for backup {"isAuthenticating":false,"isConnecting":false,"isDestroying":false,"service":"whatsapp-api","sessionId":"917290907299","timestamp":"2025-06-20 09:50:14","type":"session"}
+0|server  | info: Creating initial backup after successful connection {"service":"whatsapp-api","sessionId":"919143236000","timestamp":"2025-06-20 09:50:15","type":"session"}
+0|server  | info: Creating session backup with integrity verification (creds file only) {"service":"whatsapp-api","sessionId":"919143236000","timestamp":"2025-06-20 09:50:15","type":"session"}
+0|server  | info: Auth file validation passed: creds.json {"service":"whatsapp-api","sessionId":"919143236000","timestamp":"2025-06-20 09:50:15","type":"session"}
+0|server  | warn: Pre-backup integrity check failed, skipping backup {"details":{"authValid":true,"credentialsVerified":true,"integrityScore":55,"minRequiredScore":70,"noActiveErrors":true,"retryCount":0,"sessionStable":false,"sessionStableDuration":6343,"socketHealthy":false,"streamConflicts":0},"reason":"Session not stable enough (6s < 30s required)","service":"whatsapp-api","sessionId":"919143236000","timestamp":"2025-06-20 09:50:15"}
+0|server  | info: Connection closed {"error":"Stream Errored (conflict)","isAuthenticating":false,"qrCodeScanned":false,"reason":401,"service":"whatsapp-api","sessionId":"917290907299","shouldReconnect":false,"timestamp":"2025-06-20 09:50:15","type":"session"}
+0|server  | info: Session logged out - analyzing reason and attempting recovery {"service":"whatsapp-api","sessionId":"917290907299","timestamp":"2025-06-20 09:50:15","type":"session"}
+0|server  | info: Logout attempt 1 {"lastActivity":1750412978107,"service":"whatsapp-api","sessionId":"917290907299","timestamp":"2025-06-20 09:50:15","totalAttempts":1,"type":"session"}
+0|server  | info: Auth file validation passed: creds.json {"service":"whatsapp-api","sessionId":"917290907299","timestamp":"2025-06-20 09:50:15","type":"session"}
+0|server  | info: Auth files appear valid despite logout - testing with limited reconnection {"service":"whatsapp-api","sessionId":"917290907299","timestamp":"2025-06-20 09:50:15","type":"session"}
+0|server  | info: POST /api/sendTextSMS {"body":{"authToken":"[HIDDEN]","messageText":"TEST","receiverId":"917000782082","senderId":"917290907299"},"ip":"::ffff:127.0.0.1","service":"whatsapp-api","timestamp":"2025-06-20 09:50:17","userAgent":"axios/1.7.9"}
+0|server  | info: Text message send requested {"endpoint":"/sendTextSMS","messageLength":4,"receiverId":"917000782082","senderId":"917290907299","service":"whatsapp-api","timestamp":"2025-06-20 09:50:17","type":"api"}
+0|server  | info: Text message send requested {"endpoint":"/sendTextSMS","messageLength":4,"receiverId":"917000782082","senderId":"917290907299","service":"whatsapp-api","timestamp":"2025-06-20 09:50:17"}
+0|server  | info: Session not connected, attempting auto-reconnect {"senderId":"917290907299","service":"whatsapp-api","timestamp":"2025-06-20 09:50:17"}
+0|server  | info: Auto-reconnecting session {"service":"whatsapp-api","sessionId":"917290907299","timestamp":"2025-06-20 09:50:17"}
+0|server  | info: Validating session auth files before recovery {"service":"whatsapp-api","sessionId":"917290907299","timestamp":"2025-06-20 09:50:17"}
+0|server  | info: Auth file validation passed: creds.json {"service":"whatsapp-api","sessionId":"917290907299","timestamp":"2025-06-20 09:50:17","type":"session"}
+0|server  | info: Auth files validation passed {"service":"whatsapp-api","sessionId":"917290907299","timestamp":"2025-06-20 09:50:17"}
+0|server  | info: Valid authentication data found for session 917290907299 {"service":"whatsapp-api","timestamp":"2025-06-20 09:50:17"}
+0|server  | info: Session eligible for auto-reconnect (has authentication data) {"service":"whatsapp-api","sessionId":"917290907299","timestamp":"2025-06-20 09:50:17"}
+0|server  | 🧹 Cleaning up heartbeat for session: 917290907299
+0|server  | info: Validation cache cleared {"service":"whatsapp-api","sessionId":"917290907299","timestamp":"2025-06-20 09:50:17","type":"session"}
+0|server  | info: Destroying socket - current state {"currentStateName":"UNKNOWN","hasUser":true,"service":"whatsapp-api","sessionId":"917290907299","stateNames":["CONNECTING","OPEN","CLOSING","CLOSED"],"timestamp":"2025-06-20 09:50:17","type":"session"}
+0|server  | info: Socket without readyState during destroy, attempting gentle cleanup {"service":"whatsapp-api","sessionId":"917290907299","timestamp":"2025-06-20 09:50:17","type":"session"}
+0|server  | info: Socket lacks internal state, skipping end() to prevent crash {"service":"whatsapp-api","sessionId":"917290907299","timestamp":"2025-06-20 09:50:17","type":"session"}
+0|server  | info: Validation cache cleared {"service":"whatsapp-api","sessionId":"917290907299","timestamp":"2025-06-20 09:50:17","type":"session"}
+0|server  | info: Session destroyed successfully {"service":"whatsapp-api","sessionId":"917290907299","timestamp":"2025-06-20 09:50:17","type":"session"}
+0|server  | info: Testing reconnection attempt 1 with 3000ms delay {"service":"whatsapp-api","sessionId":"917290907299","timestamp":"2025-06-20 09:50:18","type":"session"}
+0|server  | info: Creating WhatsApp socket and connecting {"service":"whatsapp-api","sessionId":"917290907299","timestamp":"2025-06-20 09:50:18","type":"session"}
+0|server  | info: WhatsApp socket created and connection started {"service":"whatsapp-api","sessionId":"917290907299","timestamp":"2025-06-20 09:50:18","type":"session"}
+0|server  | 🔄 Connecting to WhatsApp... (Session: 91729090...)
+0|server  | info: Connecting to WhatsApp... {"service":"whatsapp-api","sessionId":"917290907299","timestamp":"2025-06-20 09:50:18","type":"session"}
+0|server  | info: Initializing Baileys session (lazy mode) {"service":"whatsapp-api","sessionId":"917290907299","timestamp":"2025-06-20 09:50:18","type":"session"}
+0|server  | info: Checking credential file structure for compatibility {"service":"whatsapp-api","sessionId":"917290907299","timestamp":"2025-06-20 09:50:18","type":"session"}
+0|server  | info: Credential file structure is already correct {"service":"whatsapp-api","sessionId":"917290907299","timestamp":"2025-06-20 09:50:18","type":"session"}
+0|server  | info: Baileys session initialized successfully (lazy mode) {"service":"whatsapp-api","sessionId":"917290907299","timestamp":"2025-06-20 09:50:18","type":"session"}
+0|server  | info: Creating WhatsApp socket and connecting {"service":"whatsapp-api","sessionId":"917290907299","timestamp":"2025-06-20 09:50:18","type":"session"}
+0|server  | info: WhatsApp socket created and connection started {"service":"whatsapp-api","sessionId":"917290907299","timestamp":"2025-06-20 09:50:18","type":"session"}
+0|server  | info: Session auto-reconnected successfully {"service":"whatsapp-api","sessionId":"917290907299","timestamp":"2025-06-20 09:50:18"}
+0|server  | info: Auto-reconnect completed {"senderId":"917290907299","service":"whatsapp-api","timestamp":"2025-06-20 09:50:18"}
+0|server  | info: Session not connected, waiting for connection {"senderId":"917290907299","service":"whatsapp-api","timestamp":"2025-06-20 09:50:18"}
+0|server  | 🔄 Connecting to WhatsApp... (Session: 91729090...)
+0|server  | info: Connecting to WhatsApp... {"service":"whatsapp-api","sessionId":"917290907299","timestamp":"2025-06-20 09:50:18","type":"session"}
+0|server  | info: POST /api/createSession {"body":{"adminId":100,"authToken":"[HIDDEN]","senderId":"94778708617","userId":933},"ip":"::ffff:127.0.0.1","service":"whatsapp-api","timestamp":"2025-06-20 09:50:20","userAgent":"axios/1.7.9"}
+0|server  | info: Session database entry created {"adminId":100,"service":"whatsapp-api","sessionId":"94778708617","timestamp":"2025-06-20 09:50:20","userId":"933"}
+0|server  | info: New session created with lazy initialization {"service":"whatsapp-api","sessionId":"94778708617","timestamp":"2025-06-20 09:50:20"}
+0|server  | info: Initializing Baileys session (lazy mode) {"service":"whatsapp-api","sessionId":"94778708617","timestamp":"2025-06-20 09:50:20","type":"session"}
+0|server  | info: No auth files found, checking for backup {"service":"whatsapp-api","sessionId":"94778708617","timestamp":"2025-06-20 09:50:20","type":"session"}
+0|server  | info: Baileys session initialized successfully (lazy mode) {"service":"whatsapp-api","sessionId":"94778708617","timestamp":"2025-06-20 09:50:20","type":"session"}
+0|server  | info: Session created and initialized {"service":"whatsapp-api","sessionId":"94778708617","timestamp":"2025-06-20 09:50:20"}
+0|server  | info: Session created {"adminId":100,"endpoint":"/createSession","service":"whatsapp-api","sessionId":"94778708617","timestamp":"2025-06-20 09:50:20","type":"api","userId":"933"}
+0|server  | info: Connection closed {"error":"Connection Failure","isAuthenticating":false,"qrCodeScanned":false,"reason":401,"service":"whatsapp-api","sessionId":"917290907299","shouldReconnect":false,"timestamp":"2025-06-20 09:50:23","type":"session"}
+0|server  | info: Session logged out - analyzing reason and attempting recovery {"service":"whatsapp-api","sessionId":"917290907299","timestamp":"2025-06-20 09:50:23","type":"session"}
+0|server  | info: Logout attempt 1 {"lastActivity":1750413018733,"service":"whatsapp-api","sessionId":"917290907299","timestamp":"2025-06-20 09:50:23","totalAttempts":1,"type":"session"}
+0|server  | info: Auth file validation passed: creds.json {"service":"whatsapp-api","sessionId":"917290907299","timestamp":"2025-06-20 09:50:23","type":"session"}
+0|server  | info: Auth files appear valid despite logout - testing with limited reconnection {"service":"whatsapp-api","sessionId":"917290907299","timestamp":"2025-06-20 09:50:23","type":"session"}
+0|server  | info: Connection closed {"error":"Connection Failure","isAuthenticating":false,"qrCodeScanned":false,"reason":401,"service":"whatsapp-api","sessionId":"917290907299","shouldReconnect":false,"timestamp":"2025-06-20 09:50:23","type":"session"}
+0|server  | info: Session logged out - analyzing reason and attempting recovery {"service":"whatsapp-api","sessionId":"917290907299","timestamp":"2025-06-20 09:50:23","type":"session"}
+0|server  | info: Logout attempt 2 {"lastActivity":1750412978107,"service":"whatsapp-api","sessionId":"917290907299","timestamp":"2025-06-20 09:50:23","totalAttempts":2,"type":"session"}
+0|server  | info: Auth file validation passed: creds.json {"service":"whatsapp-api","sessionId":"917290907299","timestamp":"2025-06-20 09:50:23","type":"session"}
+0|server  | info: Auth files appear valid despite logout - testing with limited reconnection {"service":"whatsapp-api","sessionId":"917290907299","timestamp":"2025-06-20 09:50:23","type":"session"}
+0|server  | info: Testing reconnection attempt 1 with 3000ms delay {"service":"whatsapp-api","sessionId":"917290907299","timestamp":"2025-06-20 09:50:26","type":"session"}
+0|server  | info: Destroying existing socket before creating new one {"hasUser":true,"service":"whatsapp-api","sessionId":"917290907299","socketExists":true,"timestamp":"2025-06-20 09:50:26","type":"session"}
+0|server  | info: Socket cleanup - current state {"currentStateName":"UNKNOWN","service":"whatsapp-api","sessionId":"917290907299","stateNames":["CONNECTING","OPEN","CLOSING","CLOSED"],"timestamp":"2025-06-20 09:50:26","type":"session"}
+0|server  | info: Socket without readyState, attempting gentle cleanup {"service":"whatsapp-api","sessionId":"917290907299","timestamp":"2025-06-20 09:50:26","type":"session"}
+0|server  | info: Socket lacks internal state, skipping end() to prevent crash {"service":"whatsapp-api","sessionId":"917290907299","timestamp":"2025-06-20 09:50:26","type":"session"}
+0|server  | warn: Session connection wait timed out {"senderId":"917290907299","service":"whatsapp-api","timestamp":"2025-06-20 09:50:26"}
+0|server  | error: Error in sendTextMessage with auto-recovery {"error":"Connection timeout - session failed to connect within 8 seconds","receiverId":"917000782082","senderId":"917290907299","service":"whatsapp-api","timestamp":"2025-06-20 09:50:26"}
+0|server  | info: Retrying with fresh session {"senderId":"917290907299","service":"whatsapp-api","timestamp":"2025-06-20 09:50:26"}
+0|server  | info: Auto-reconnecting session {"service":"whatsapp-api","sessionId":"917290907299","timestamp":"2025-06-20 09:50:26"}
+0|server  | info: Session already connecting, waiting for completion {"service":"whatsapp-api","sessionId":"917290907299","timestamp":"2025-06-20 09:50:26"}
+0|server  | info: Creating WhatsApp socket and connecting {"service":"whatsapp-api","sessionId":"917290907299","timestamp":"2025-06-20 09:50:26","type":"session"}
+0|server  | info: WhatsApp socket created and connection started {"service":"whatsapp-api","sessionId":"917290907299","timestamp":"2025-06-20 09:50:26","type":"session"}
+0|server  | 🔄 Connecting to WhatsApp... (Session: 91729090...)
+0|server  | info: Connecting to WhatsApp... {"service":"whatsapp-api","sessionId":"917290907299","timestamp":"2025-06-20 09:50:26","type":"session"}
+0|server  | warn: Session connection wait timed out {"service":"whatsapp-api","sessionId":"917290907299","timestamp":"2025-06-20 09:50:27"}
+0|server  | info: Validating session auth files before recovery {"service":"whatsapp-api","sessionId":"917290907299","timestamp":"2025-06-20 09:50:27"}
+0|server  | info: Auth file validation passed: creds.json {"service":"whatsapp-api","sessionId":"917290907299","timestamp":"2025-06-20 09:50:27","type":"session"}
+0|server  | info: Auth files validation passed {"service":"whatsapp-api","sessionId":"917290907299","timestamp":"2025-06-20 09:50:27"}
+0|server  | info: Valid authentication data found for session 917290907299 {"service":"whatsapp-api","timestamp":"2025-06-20 09:50:27"}
+0|server  | info: Session eligible for auto-reconnect (has authentication data) {"service":"whatsapp-api","sessionId":"917290907299","timestamp":"2025-06-20 09:50:27"}
+0|server  | 🧹 Cleaning up heartbeat for session: 917290907299
+0|server  | info: Validation cache cleared {"service":"whatsapp-api","sessionId":"917290907299","timestamp":"2025-06-20 09:50:27","type":"session"}
+0|server  | info: Destroying socket - current state {"currentStateName":"UNKNOWN","hasUser":true,"service":"whatsapp-api","sessionId":"917290907299","stateNames":["CONNECTING","OPEN","CLOSING","CLOSED"],"timestamp":"2025-06-20 09:50:27","type":"session"}
+0|server  | info: Socket without readyState during destroy, attempting gentle cleanup {"service":"whatsapp-api","sessionId":"917290907299","timestamp":"2025-06-20 09:50:27","type":"session"}
+0|server  | info: Socket lacks internal state, skipping end() to prevent crash {"service":"whatsapp-api","sessionId":"917290907299","timestamp":"2025-06-20 09:50:27","type":"session"}
+0|server  | info: Validation cache cleared {"service":"whatsapp-api","sessionId":"917290907299","timestamp":"2025-06-20 09:50:27","type":"session"}
+0|server  | info: Session destroyed successfully {"service":"whatsapp-api","sessionId":"917290907299","timestamp":"2025-06-20 09:50:27","type":"session"}
+0|server  | info: Initializing Baileys session (lazy mode) {"service":"whatsapp-api","sessionId":"917290907299","timestamp":"2025-06-20 09:50:28","type":"session"}
+0|server  | info: Checking credential file structure for compatibility {"service":"whatsapp-api","sessionId":"917290907299","timestamp":"2025-06-20 09:50:28","type":"session"}
+0|server  | info: Credential file structure is already correct {"service":"whatsapp-api","sessionId":"917290907299","timestamp":"2025-06-20 09:50:28","type":"session"}
+0|server  | info: Baileys session initialized successfully (lazy mode) {"service":"whatsapp-api","sessionId":"917290907299","timestamp":"2025-06-20 09:50:28","type":"session"}
+0|server  | info: Creating WhatsApp socket and connecting {"service":"whatsapp-api","sessionId":"917290907299","timestamp":"2025-06-20 09:50:28","type":"session"}
+0|server  | info: WhatsApp socket created and connection started {"service":"whatsapp-api","sessionId":"917290907299","timestamp":"2025-06-20 09:50:28","type":"session"}
+0|server  | info: Session auto-reconnected successfully {"service":"whatsapp-api","sessionId":"917290907299","timestamp":"2025-06-20 09:50:28"}
+0|server  | error: Retry also failed {"error":"Fresh session still not connected","senderId":"917290907299","service":"whatsapp-api","timestamp":"2025-06-20 09:50:28"}
+0|server  | error: Error in /sendTextSMS {"error":"Connection timeout - retry failed: Fresh session still not connected","senderId":"917290907299","service":"whatsapp-api","timestamp":"2025-06-20 09:50:28"}
+0|server  | 🔄 Connecting to WhatsApp... (Session: 91729090...)
+0|server  | info: Connecting to WhatsApp... {"service":"whatsapp-api","sessionId":"917290907299","timestamp":"2025-06-20 09:50:28","type":"session"}
+0|server  | info: POST /api/updateWebhook {"body":{"authToken":"[HIDDEN]","senderId":"919143236000","webhookStatus":1,"webhookUrl":"https://rest.botmastersender.com/webhook/receive"},"ip":"::ffff:127.0.0.1","service":"whatsapp-api","timestamp":"2025-06-20 09:50:29","userAgent":"axios/1.7.9"}
+0|server  | info: Webhook configuration update requested {"endpoint":"/updateWebhook","fieldsUpdated":{"status":true,"url":true},"senderId":"919143236000","service":"whatsapp-api","timestamp":"2025-06-20 09:50:29","type":"api","webhookStatus":true,"webhookUrl":"https://rest.botmastersender.com/webhook/receive"}
+0|server  | info: Webhook configuration updated {"service":"whatsapp-api","sessionId":"919143236000","timestamp":"2025-06-20 09:50:29","webhookStatus":true,"webhookUrl":"https://rest.botmastersender.com/webhook/receive"}
+0|server  | info: Testing reconnection attempt 2 with 6000ms delay {"service":"whatsapp-api","sessionId":"917290907299","timestamp":"2025-06-20 09:50:29","type":"session"}
+0|server  | info: Destroying existing socket before creating new one {"hasUser":true,"service":"whatsapp-api","sessionId":"917290907299","socketExists":true,"timestamp":"2025-06-20 09:50:29","type":"session"}
+0|server  | info: Socket cleanup - current state {"currentStateName":"UNKNOWN","service":"whatsapp-api","sessionId":"917290907299","stateNames":["CONNECTING","OPEN","CLOSING","CLOSED"],"timestamp":"2025-06-20 09:50:29","type":"session"}
+0|server  | info: Socket without readyState, attempting gentle cleanup {"service":"whatsapp-api","sessionId":"917290907299","timestamp":"2025-06-20 09:50:29","type":"session"}
+0|server  | info: Socket lacks internal state, skipping end() to prevent crash {"service":"whatsapp-api","sessionId":"917290907299","timestamp":"2025-06-20 09:50:29","type":"session"}
+0|server  | info: Creating WhatsApp socket and connecting {"service":"whatsapp-api","sessionId":"917290907299","timestamp":"2025-06-20 09:50:30","type":"session"}
+0|server  | info: WhatsApp socket created and connection started {"service":"whatsapp-api","sessionId":"917290907299","timestamp":"2025-06-20 09:50:30","type":"session"}
+0|server  | 🔄 Connecting to WhatsApp... (Session: 91729090...)
+0|server  | info: Connecting to WhatsApp... {"service":"whatsapp-api","sessionId":"917290907299","timestamp":"2025-06-20 09:50:30","type":"session"}
+0|server  | info: Connection closed {"error":"Connection Failure","isAuthenticating":false,"qrCodeScanned":false,"reason":401,"service":"whatsapp-api","sessionId":"917290907299","shouldReconnect":false,"timestamp":"2025-06-20 09:50:30","type":"session"}
+0|server  | info: Session logged out - analyzing reason and attempting recovery {"service":"whatsapp-api","sessionId":"917290907299","timestamp":"2025-06-20 09:50:31","type":"session"}
+0|server  | info: Logout attempt 1 {"lastActivity":1750413028757,"service":"whatsapp-api","sessionId":"917290907299","timestamp":"2025-06-20 09:50:31","totalAttempts":1,"type":"session"}
+0|server  | info: Auth file validation passed: creds.json {"service":"whatsapp-api","sessionId":"917290907299","timestamp":"2025-06-20 09:50:31","type":"session"}
+0|server  | info: Auth files appear valid despite logout - testing with limited reconnection {"service":"whatsapp-api","sessionId":"917290907299","timestamp":"2025-06-20 09:50:31","type":"session"}
+^C
+botmastersender-wa5@lapking:~/htdocs/wa5.botmastersender.com$ ^C
+botmastersender-wa5@lapking:~/htdocs/wa5.botmastersender.com$ grep -r "917290907299" /home/*/htdocs/*/sessions/ 2>/dev/null | head -10
+botmastersender-wa5@lapking:~/htdocs/wa5.botmastersender.com$ grep -r "917290907299" /home/*/htdocs/*/sessions/ 2>/dev/null | head -10
+botmastersender-wa5@lapking:~/htdocs/wa5.botmastersender.com$ ls -la ./sessions/917290907299/auth/ 2>/dev/null || echo "No auth directory found"
+total 8
+drwxrwx--- 2 botmastersender-wa5 botmastersender-wa5 4096 Jun 20 09:50 .
+drwxrwx--- 4 botmastersender-wa5 botmastersender-wa5 4096 Jun 20 09:50 ..
+botmastersender-wa5@lapking:~/htdocs/wa5.botmastersender.com$ 

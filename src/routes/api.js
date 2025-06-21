@@ -679,7 +679,7 @@ router.post('/createSession', validateAuthToken, validateSenderId, async (req, r
         const { senderId, name, userId, user_id, adminId, admin_id, webhookUrl } = req.body;
         
         // Use aliases if main parameters are not provided
-        const finalUserId = userId || user_id;
+        const finalUserId = String(userId || user_id || senderId);
         const finalAdminId = adminId || admin_id;
         
         // Check if session already exists
@@ -822,6 +822,86 @@ router.get('/sessionStatus/:senderId', async (req, res) => {
             message: 'Failed to retrieve session status',
             error: error.message,
             senderId: req.params?.senderId
+        });
+    }
+});
+
+// Update group message webhook setting
+router.post('/updateGroupMessageSetting', validateAuthToken, validateSenderId, checkSessionExists, async (req, res) => {
+    try {
+        const { 
+            senderId, sessionId,                    // Session identifier (with alias support)
+            sendGroupMessages, send_group_messages, enabled    // Group message setting (with alias support)
+        } = req.body;
+        
+        // Use aliases if main parameter is not provided
+        const finalSenderId = senderId || sessionId;
+        let finalSendGroupMessages = sendGroupMessages;
+        
+        // Handle alias parameters
+        if (finalSendGroupMessages === undefined) {
+            if (send_group_messages !== undefined) {
+                finalSendGroupMessages = send_group_messages;
+            } else if (enabled !== undefined) {
+                finalSendGroupMessages = enabled;
+            }
+        }
+        
+        // Validate that the parameter is provided
+        if (finalSendGroupMessages === undefined) {
+            return res.status(400).json({
+                success: false,
+                message: 'Missing required parameter',
+                error: 'sendGroupMessages (or send_group_messages/enabled) is required',
+                data: {
+                    senderId: finalSenderId,
+                    acceptedParameters: {
+                        sendGroupMessages: 'Boolean - enable/disable group message webhooks',
+                        send_group_messages: 'Boolean - alias for sendGroupMessages',
+                        enabled: 'Boolean - alias for sendGroupMessages'
+                    },
+                    examples: {
+                        enable: '{ "sendGroupMessages": true }',
+                        disable: '{ "sendGroupMessages": false }',
+                        usingAlias: '{ "send_group_messages": true }'
+                    }
+                }
+            });
+        }
+        
+        // Convert to boolean
+        const updateSendGroupMessages = Boolean(finalSendGroupMessages);
+        
+        logger.api('/updateGroupMessageSetting', 'Group message setting update requested', { 
+            senderId: finalSenderId, 
+            sendGroupMessages: updateSendGroupMessages
+        });
+        
+        // Update group message setting
+        await sessionManager.database.updateGroupMessageSetting(finalSenderId, updateSendGroupMessages);
+        
+        res.json({
+            success: true,
+            message: 'Group message setting updated successfully',
+            data: {
+                senderId: finalSenderId,
+                sendGroupMessages: updateSendGroupMessages,
+                groupMessagesEnabled: updateSendGroupMessages,
+                timestamp: new Date().toISOString(),
+                sessionStatus: req.sessionData.status,
+                note: updateSendGroupMessages ? 
+                    'Group messages will now be sent to webhooks (if webhook is enabled)' :
+                    'Group messages will not be sent to webhooks (private messages still sent)'
+            }
+        });
+        
+    } catch (error) {
+        logger.error('Error in /updateGroupMessageSetting', { error: error.message, senderId: req.body?.senderId || req.body?.sessionId });
+        res.status(500).json({
+            success: false,
+            message: 'Failed to update group message setting',
+            error: error.message,
+            senderId: req.body?.senderId || req.body?.sessionId
         });
     }
 });
@@ -1232,7 +1312,7 @@ router.post('/compareWebhookPayloads', validateAuthToken, async (req, res) => {
         console.log(JSON.stringify(regularWhatsAppPayload, null, 2));
 
         try {
-            const regularResult = await sessionManager.webhookManager.sendWebhook(webhookUrl, regularWhatsAppPayload);
+            const regularResult = await sessionManager.webhookManager.sendWebhook(webhookUrl, 'test_user', regularWhatsAppPayload);
             results.push({
                 type: 'Regular WhatsApp',
                 success: true,
@@ -1257,7 +1337,7 @@ router.post('/compareWebhookPayloads', validateAuthToken, async (req, res) => {
             console.log(JSON.stringify(businessWhatsAppPayload, null, 2));
 
             try {
-                const businessResult = await sessionManager.webhookManager.sendWebhook(webhookUrl, businessWhatsAppPayload);
+                const businessResult = await sessionManager.webhookManager.sendWebhook(webhookUrl, 'test_user', businessWhatsAppPayload);
                 results.push({
                     type: 'WhatsApp Business',
                     success: true,
@@ -1801,6 +1881,7 @@ router.get('/sessions/user/:userId', async (req, res) => {
             webhookUrl: session.webhook_url,
             webhookStatus: session.webhook_status,
             autoRead: session.auto_read,
+            sendGroupMessages: session.send_group_messages,
             createdAt: session.created_at,
             updatedAt: session.updated_at,
             // Runtime status from active sessions
@@ -1811,7 +1892,7 @@ router.get('/sessions/user/:userId', async (req, res) => {
         
         res.json({
             success: true,
-            message: `Sessions retrieved successfully for user ${userId}`,
+            message: `Sessions retrieved successfully for user_id ${userId}`,
             data: {
                 userId: userId,
                 sessions: responseData,
@@ -1915,6 +1996,68 @@ router.post('/sessionDiagnostics', validateAuthToken, validateSenderId, async (r
         res.status(500).json({
             success: false,
             message: 'Failed to get session diagnostics',
+            error: error.message,
+            senderId: req.body?.senderId
+        });
+    }
+});
+
+// Debug unknown message types
+router.post('/debugUnknownMessages', validateAuthToken, validateSenderId, checkSessionExists, async (req, res) => {
+    try {
+        const { senderId, enableDetailedLogging = true } = req.body;
+        
+        logger.api('/debugUnknownMessages', 'Unknown message debugging requested', { senderId, enableDetailedLogging });
+        
+        const session = await sessionManager.getSessionBySenderId(senderId);
+        if (!session) {
+            return res.status(404).json({
+                success: false,
+                message: 'Session not found',
+                error: 'Session not found or not active',
+                senderId
+            });
+        }
+
+        // Enable detailed logging for unknown messages
+        session.debugUnknownMessages = enableDetailedLogging;
+        
+        console.log(`🔍 UNKNOWN MESSAGE DEBUGGING ${enableDetailedLogging ? 'ENABLED' : 'DISABLED'} for session ${senderId}`);
+        console.log('═══════════════════════════════════════════════════════════════════');
+        
+        if (enableDetailedLogging) {
+            console.log('📋 Next unknown messages will show detailed structure');
+            console.log('📊 Look for messages like: "🔍 [SessionID] DEBUG - Unknown message type(s): ..."');
+            console.log('💡 Send some messages to this WhatsApp number to see what message types are being received');
+        }
+
+        res.json({
+            success: true,
+            message: `Unknown message debugging ${enableDetailedLogging ? 'enabled' : 'disabled'} successfully`,
+            data: {
+                senderId,
+                debugEnabled: enableDetailedLogging,
+                timestamp: new Date().toISOString(),
+                instructions: [
+                    'Send various message types to this WhatsApp number',
+                    'Check console logs for "🔍 DEBUG - Unknown message type(s)" messages',
+                    'Look for detailed message structure information in the logs',
+                    'Common unknown types: stickers, reactions, locations, buttons, lists, protocols'
+                ],
+                supportedTypes: [
+                    'text (conversation, extendedTextMessage)',
+                    'image', 'video', 'audio', 'document', 'contact',
+                    'location', 'sticker', 'reaction', 'list', 'buttons', 
+                    'template', 'protocol', 'ephemeral', 'view_once'
+                ]
+            }
+        });
+        
+    } catch (error) {
+        logger.error('Error in /debugUnknownMessages', { error: error.message, senderId: req.body?.senderId });
+        res.status(500).json({
+            success: false,
+            message: 'Failed to enable unknown message debugging',
             error: error.message,
             senderId: req.body?.senderId
         });

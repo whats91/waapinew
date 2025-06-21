@@ -216,6 +216,16 @@ process.on('unhandledRejection', (reason, promise) => {
     if (reason && reason.message) {
         const errorMessage = reason.message.toLowerCase();
         
+        // CRITICAL FIX: Handle 408 timeout errors specifically
+        if (reason.output && reason.output.statusCode === 408) {
+            logger.warn('Baileys 408 timeout error detected, continuing operation', {
+                errorType: 'baileys_timeout',
+                message: reason.message,
+                statusCode: reason.output.statusCode
+            });
+            return; // Don't exit for 408 errors
+        }
+        
         // Stream conflict or timeout errors - usually recoverable
         if (errorMessage.includes('timed out') || 
             errorMessage.includes('stream errored') ||

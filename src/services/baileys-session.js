@@ -66,7 +66,10 @@ class BaileysSession {
         this.backupEnabled = true; // Flag to enable/disable backup system
         this.maxBackupAge = 24 * 60 * 60 * 1000; // Maximum backup age (24 hours)
         this.backupRetryCount = 0; // Track backup retry attempts
-        this.maxBackupRetries = 3; // Maximum backup retry attempts
+        this.maxBackupRetries = 3;
+        
+        // CRITICAL FIX: Track timeout errors for session stability
+        this.consecutiveTimeoutErrors = 0; // Track consecutive 408 timeout errors
         
         // NEW: Track consecutive logout attempts to detect invalid credentials
         this.consecutiveLogoutAttempts = 0; // Track logout attempts for credential validation
@@ -1301,8 +1304,8 @@ class BaileysSession {
                 syncFullHistory: false, // This can cause issues in v6.7.17, set to false
                 markOnlineOnConnect: true,
                 generateHighQualityLinkPreview: true,
-                // CRITICAL FIX: Use same timeout settings as working project
-                defaultQueryTimeoutMs: 30000, // 30 seconds instead of 60
+                // CRITICAL FIX: Increase timeout settings to prevent 408 errors
+                defaultQueryTimeoutMs: 60000, // Increased to 60 seconds to prevent timeouts
                 connectTimeoutMs: this.connectionTimeout,
                 keepAliveIntervalMs: 25000, // Use 25s like working project
                 retryRequestDelayMs: 1000, // Use 1s like working project
@@ -1957,44 +1960,26 @@ class BaileysSession {
                     }
                 } else if (connection === 'open') {
                     this.isConnected = true;
-                    this.retryCount = 0;
+                    this.retryCount = 0; // Reset retry count on successful connection
+                    this.consecutiveLogoutAttempts = 0; // Reset logout attempts on successful connection
+                    this.consecutiveTimeoutErrors = 0; // Reset timeout errors on successful connection
+                    this.lastActivity = Date.now(); // Update last activity
                     
-                    // SUCCESS: Clear all authentication state
+                    // NEW: Clear authentication state flags on successful connection
                     this.clearAuthenticationState();
-                    this.qrCodeData = null;
-                    this.qrCodeString = null; // Clear QR string when connected
-                    this.qrCodeTimestamp = null; // Clear QR timestamp when connected
                     
-                    // CRITICAL: Reset consecutive logout attempts on successful connection
-                    this.consecutiveLogoutAttempts = 0;
+                    await this.updateSessionStatus('connected').catch(err => {
+                        logger.error('Error updating session status to connected', { sessionId: this.sessionId, error: err.message });
+                    });
                     
-                    console.log('\n' + '🎉'.repeat(20));
+                    console.log('\n🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉');
                     console.log('✅ WHATSAPP SESSION CONNECTED SUCCESSFULLY!');
                     console.log(`📱 Session ID: ${this.sessionId.substring(0, 8)}...`);
                     console.log('🚀 Ready to send and receive messages');
                     console.log('🔄 Auto-refresh monitoring active');
-                    console.log('🎉'.repeat(20) + '\n');
+                    console.log('🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉\n');
                     
                     logger.session(this.sessionId, 'Session connected successfully');
-                    await this.updateSessionStatus('connected').catch(err => {
-                        logger.error('Error updating session status to connected', { sessionId: this.sessionId, error: err.message });
-                    });
-
-                    // NEW: Create initial backup on successful connection
-                    setTimeout(async () => {
-                        try {
-                            logger.session(this.sessionId, 'Creating initial backup after successful connection');
-                            const backupCreated = await this.createSessionBackup();
-                            if (backupCreated) {
-                                console.log(`💾 Credential backup created for ${this.sessionId.substring(0, 8)}...`);
-                            }
-                        } catch (backupError) {
-                            logger.error('Error creating initial backup', { 
-                                sessionId: this.sessionId, 
-                                error: backupError.message 
-                            });
-                        }
-                    }, 5000); // Wait 5 seconds after connection to ensure stability
                 } else if (connection === 'connecting') {
                     console.log(`\n🔄 Connecting to WhatsApp... (Session: ${this.sessionId.substring(0, 8)}...)\n`);
                     logger.session(this.sessionId, 'Connecting to WhatsApp...');
@@ -2036,11 +2021,45 @@ class BaileysSession {
             this.socket.query = (...args) => {
                 const promise = originalQuery.apply(this.socket, args);
                 return promise.catch(error => {
-                    logger.error('Socket query operation failed', {
-                        sessionId: this.sessionId,
-                        error: error.message,
-                        operation: args[0]?.tag || 'unknown'
-                    });
+                    // CRITICAL FIX: Handle 408 timeout errors specifically
+                    if (error.output && error.output.statusCode === 408) {
+                        logger.warn('Socket query timeout (408) - session may be unstable', {
+                            sessionId: this.sessionId,
+                            error: error.message,
+                            operation: args[0]?.tag || 'unknown',
+                            socketState: this.socket?.readyState
+                        });
+                        
+                        // Mark session as potentially unstable
+                        this.consecutiveTimeoutErrors = (this.consecutiveTimeoutErrors || 0) + 1;
+                        
+                        // If too many timeouts, suggest reconnection
+                        if (this.consecutiveTimeoutErrors >= 3) {
+                            logger.warn('Multiple timeout errors detected - session needs reconnection', {
+                                sessionId: this.sessionId,
+                                timeoutCount: this.consecutiveTimeoutErrors
+                            });
+                            // Reset the flag and attempt reconnection in background
+                            this.consecutiveTimeoutErrors = 0;
+                            setTimeout(() => {
+                                if (!this.isDestroying) {
+                                    logger.info('Auto-reconnecting due to timeout errors', { sessionId: this.sessionId });
+                                    this.connect().catch(reconnectError => {
+                                        logger.error('Auto-reconnect after timeouts failed', {
+                                            sessionId: this.sessionId,
+                                            error: reconnectError.message
+                                        });
+                                    });
+                                }
+                            }, 5000);
+                        }
+                    } else {
+                        logger.error('Socket query operation failed', {
+                            sessionId: this.sessionId,
+                            error: error.message,
+                            operation: args[0]?.tag || 'unknown'
+                        });
+                    }
                     throw error; // Re-throw to maintain original behavior
                 });
             };
@@ -2082,20 +2101,20 @@ class BaileysSession {
                         const message = messages[i];
                         
                         try {
-                            // Keep all the filtering logic but remove debug logging
-                            if (message?.key) {
-                                const hasMessage = !!message;
-                                const hasKey = !!message.key;
-                                const notBroadcast = !isJidBroadcast(message.key.remoteJid);
-                                const notStatusBroadcast = !isJidStatusBroadcast(message.key.remoteJid);
-                                const notNewsletter = !isJidNewsletter(message.key.remoteJid);
-                                const notGroup = !message.key.remoteJid?.endsWith('@g.us'); // Exclude group messages
+                                        // Keep all the filtering logic but remove debug logging
+            if (message?.key) {
+                const hasMessage = !!message;
+                const hasKey = !!message.key;
+                const notBroadcast = !isJidBroadcast(message.key.remoteJid);
+                const notStatusBroadcast = !isJidStatusBroadcast(message.key.remoteJid);
+                const notNewsletter = !isJidNewsletter(message.key.remoteJid);
+                const isGroup = message.key.remoteJid?.endsWith('@g.us'); // Check if it's a group message
+                
+                const shouldProcess = hasMessage && hasKey && notBroadcast && notStatusBroadcast && notNewsletter;
                                 
-                                const shouldProcess = hasMessage && hasKey && notBroadcast && notStatusBroadcast && notNewsletter && notGroup;
-                                
-                                if (shouldProcess) {
-                                    await this.handleIncomingMessage(message);
-                                }
+                                                if (shouldProcess) {
+                    await this.handleIncomingMessage(message, isGroup);
+                }
                             }
                         } catch (messageError) {
                             logger.error('Error handling individual message', { 
@@ -2280,7 +2299,7 @@ class BaileysSession {
         }
     }
 
-    async handleIncomingMessage(message) {
+    async handleIncomingMessage(message, isGroup = false) {
         try {
             // Check message direction first
             const isIncoming = !message.key.fromMe;
@@ -2327,37 +2346,53 @@ class BaileysSession {
             
             // Process webhooks for INCOMING messages only (keep original logic for webhooks)
             if (isIncoming && sessionData && sessionData.webhook_status && sessionData.webhook_url) {
-                const messageData = {
-                    sessionId: this.sessionId,
-                    messageId: message.key.id,
-                    remoteJid: message.key.remoteJid,
-                    fromMe: message.key.fromMe,
-                    timestamp: message.messageTimestamp,
-                    message: extractedContent,
-                    participant: message.key.participant || null,
-                    pushName: message.pushName || null,
-                    appType: appType,
-                    deviceInfo: deviceInfo,
-                    messageMetadata: {
-                        verifiedBizName: message.verifiedBizName,
-                        bizPrivacyStatus: message.bizPrivacyStatus,
-                        messageStubType: message.messageStubType,
-                        messageStubParameters: message.messageStubParameters,
-                        quotedMessage: message.message?.extendedTextMessage?.contextInfo?.quotedMessage ? true : false,
-                        mentions: message.message?.extendedTextMessage?.contextInfo?.mentionedJid || []
-                    }
-                };
-
-                try {
-                    const webhookResult = await this.webhookManager.sendWebhook(sessionData.webhook_url, messageData);
-                    // SIMPLIFIED WEBHOOK LOGGING: Just log success with response
-                    console.log(`✅ Webhook sent successfully - Status: ${webhookResult.status}`);
-                } catch (webhookError) {
-                    logger.error('Error sending webhook for message', { 
-                        sessionId: this.sessionId, 
+                // Check if this is a group message and if group messages are enabled
+                const shouldSendGroupMessage = isGroup ? sessionData.send_group_messages : true;
+                const shouldSendWebhook = !isGroup || shouldSendGroupMessage;
+                
+                if (shouldSendWebhook) {
+                    const messageData = {
+                        sessionId: sessionData.session_id,
                         messageId: message.key.id,
-                        error: webhookError.message,
-                        appType: appType
+                        remoteJid: message.key.remoteJid,
+                        fromMe: message.key.fromMe,
+                        timestamp: message.messageTimestamp,
+                        message: extractedContent,
+                        participant: message.key.participant || null,
+                        pushName: message.pushName || null,
+                        appType: appType,
+                        deviceInfo: deviceInfo,
+                        isGroup: isGroup, // Include group indicator in webhook data
+                        messageMetadata: {
+                            verifiedBizName: message.verifiedBizName,
+                            bizPrivacyStatus: message.bizPrivacyStatus,
+                            messageStubType: message.messageStubType,
+                            messageStubParameters: message.messageStubParameters,
+                            quotedMessage: message.message?.extendedTextMessage?.contextInfo?.quotedMessage ? true : false,
+                            mentions: message.message?.extendedTextMessage?.contextInfo?.mentionedJid || []
+                        }
+                    };
+
+                    try {
+                        const webhookResult = await this.webhookManager.sendWebhook(sessionData.webhook_url, sessionData.user_id, messageData);
+                        // SIMPLIFIED WEBHOOK LOGGING: Just log success with response
+                        const messageType = isGroup ? 'Group' : 'Private';
+                        console.log(`✅ ${messageType} webhook sent successfully - Status: ${webhookResult.status}`);
+                    } catch (webhookError) {
+                        logger.error('Error sending webhook for message', { 
+                            sessionId: this.sessionId, 
+                            messageId: message.key.id,
+                            error: webhookError.message,
+                            appType: appType,
+                            isGroup: isGroup
+                        });
+                    }
+                } else {
+                    // Group message but group messages are disabled
+                    logger.session(this.sessionId, 'Group message webhook skipped (group messages disabled)', {
+                        messageId: message.key.id,
+                        remoteJid: message.key.remoteJid,
+                        sendGroupMessages: sessionData.send_group_messages
                     });
                 }
             }
@@ -2402,6 +2437,39 @@ class BaileysSession {
             return { type: 'document', fileName: messageContent.documentMessage.fileName };
         } else if (messageContent?.contactMessage) {
             return { type: 'contact', displayName: messageContent.contactMessage.displayName };
+        } else if (messageContent?.locationMessage) {
+            return { type: 'location', latitude: messageContent.locationMessage.degreesLatitude, longitude: messageContent.locationMessage.degreesLongitude };
+        } else if (messageContent?.stickerMessage) {
+            return { type: 'sticker' };
+        } else if (messageContent?.reactionMessage) {
+            return { type: 'reaction', text: messageContent.reactionMessage.text, key: messageContent.reactionMessage.key };
+        } else if (messageContent?.listMessage) {
+            return { type: 'list', title: messageContent.listMessage.title };
+        } else if (messageContent?.buttonsMessage) {
+            return { type: 'buttons', headerText: messageContent.buttonsMessage.headerText };
+        } else if (messageContent?.templateMessage) {
+            return { type: 'template' };
+        } else if (messageContent?.protocolMessage) {
+            return { type: 'protocol', protocolType: messageContent.protocolMessage.type };
+        } else if (messageContent?.ephemeralMessage) {
+            return { type: 'ephemeral' };
+        } else if (messageContent?.viewOnceMessage) {
+            return { type: 'view_once' };
+        }
+        
+        // ENHANCED DEBUG: Log unknown message types to help with debugging
+        if (messageContent && Object.keys(messageContent).length > 0) {
+            const unknownTypes = Object.keys(messageContent);
+            logger.session(this.sessionId, 'Unknown message type received', { 
+                unknownTypes: unknownTypes,
+                messageStructure: Object.keys(messageContent).map(key => ({
+                    type: key,
+                    hasContent: !!messageContent[key],
+                    contentType: typeof messageContent[key]
+                }))
+            });
+            
+            console.log(`🔍 [${this.sessionId}] DEBUG - Unknown message type(s): ${unknownTypes.join(', ')}`);
         }
         
         return { type: 'unknown', raw: messageContent };

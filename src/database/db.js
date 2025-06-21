@@ -40,6 +40,7 @@ class Database {
                 webhook_url TEXT,
                 user_id TEXT,
                 admin_id TEXT,
+                send_group_messages BOOLEAN DEFAULT 0,
                 created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
                 updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
             );
@@ -83,20 +84,31 @@ class Database {
                     console.log('Admin_id column added successfully');
                 }
             });
+
+            // Add send_group_messages column to existing sessions table if it doesn't exist
+            this.db.run(`
+                ALTER TABLE sessions ADD COLUMN send_group_messages BOOLEAN DEFAULT 0;
+            `, (err) => {
+                if (err && !err.message.includes('duplicate column')) {
+                    console.error('Error adding send_group_messages column:', err.message);
+                } else if (!err) {
+                    console.log('Send_group_messages column added successfully');
+                }
+            });
         });
     }
 
     // Session operations
     async createSession(sessionData) {
-        const { session_id, name, auth_token, user_id, admin_id, webhook_url } = sessionData;
+        const { session_id, name, auth_token, user_id, admin_id, webhook_url, send_group_messages = 0 } = sessionData;
         
         return new Promise((resolve, reject) => {
             const stmt = this.db.prepare(`
-                INSERT INTO sessions (session_id, name, auth_token, user_id, admin_id, webhook_url)
-                VALUES (?, ?, ?, ?, ?, ?)
+                INSERT INTO sessions (session_id, name, auth_token, user_id, admin_id, webhook_url, send_group_messages)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
             `);
             
-            stmt.run([session_id, name, auth_token, user_id, admin_id, webhook_url], function(err) {
+            stmt.run([session_id, name, auth_token, user_id, admin_id, webhook_url, send_group_messages], function(err) {
                 if (err) {
                     reject(err);
                 } else {
@@ -161,6 +173,22 @@ class Database {
             this.db.run(
                 'UPDATE sessions SET webhook_url = ?, webhook_status = ?, updated_at = CURRENT_TIMESTAMP WHERE session_id = ?',
                 [webhookUrl, webhookStatus, sessionId],
+                function(err) {
+                    if (err) {
+                        reject(err);
+                    } else {
+                        resolve(this.changes);
+                    }
+                }
+            );
+        });
+    }
+
+    async updateGroupMessageSetting(sessionId, sendGroupMessages) {
+        return new Promise((resolve, reject) => {
+            this.db.run(
+                'UPDATE sessions SET send_group_messages = ?, updated_at = CURRENT_TIMESTAMP WHERE session_id = ?',
+                [sendGroupMessages, sessionId],
                 function(err) {
                     if (err) {
                         reject(err);

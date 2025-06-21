@@ -12,7 +12,7 @@ class WebhookManager {
         this.followRedirect = process.env.WEBHOOK_FOLLOW_REDIRECT !== 'false'; // Default true
     }
 
-    async sendWebhook(webhookUrl, data, attempt = 1) {
+    async sendWebhook(webhookUrl, userId, data, attempt = 1) {
         try {
             logger.webhook(data.sessionId, `Sending webhook (attempt ${attempt}/${this.retryAttempts})`, { 
                 webhookUrl, 
@@ -54,6 +54,9 @@ class WebhookManager {
                 dataSize: JSON.stringify(data).length,
                 userAgent: axiosConfig.headers['User-Agent']
             });
+
+            // Fix: Ensure userId is always a string to prevent property assignment errors
+            data.userId = userId ? String(userId) : 'unknown';
 
             const startTime = Date.now();
             const response = await axios.post(webhookUrl, data, axiosConfig);
